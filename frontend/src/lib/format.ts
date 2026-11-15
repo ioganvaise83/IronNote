@@ -92,3 +92,36 @@ export function setSummary(weight: number | null, repetitions: number): string {
     ? `${repetitions} ×`
     : `${formatWeight(weight)} кг × ${repetitions}`
 }
+
+/** "30 мин", "1 ч 15 мин" — the length of one timed set. */
+export function formatSetDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || seconds <= 0) return '—'
+  const total = Math.round(seconds / 60)
+  if (total < 60) return `${total} мин`
+  const hours = Math.floor(total / 60)
+  const mins = total % 60
+  return mins === 0 ? `${hours} ч` : `${hours} ч ${mins} мин`
+}
+
+/** Kilometres for anything from a lap upwards, metres below that. */
+export function formatDistance(meters: number | null | undefined): string {
+  if (meters === null || meters === undefined || meters <= 0) return '—'
+  if (meters >= 1000) {
+    return `${new Intl.NumberFormat(LOCALE, { maximumFractionDigits: 2 }).format(meters / 1000)} км`
+  }
+  return `${Math.round(meters)} м`
+}
+
+/** Minutes per kilometre, the number runners and swimmers actually think in. */
+export function pace(seconds: number | null, meters: number | null): string {
+  if (!seconds || !meters || meters <= 0) return '—'
+  const secondsPerKm = seconds / (meters / 1000)
+  const mins = Math.floor(secondsPerKm / 60)
+  const secs = Math.round(secondsPerKm % 60)
+  return `${mins}:${secs.toString().padStart(2, '0')} /км`
+}
+
+/** Total cardio time as "1 ч 45 мин". */
+export function formatTotalTime(seconds: number | null | undefined): string {
+  return formatSetDuration(seconds)
+}

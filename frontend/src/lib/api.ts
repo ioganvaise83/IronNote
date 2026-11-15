@@ -5,6 +5,7 @@
 
 import type {
   ApiErrorPayload,
+  CurrentUser,
   Exercise,
   ExerciseBest,
   ExerciseStats,
@@ -17,6 +18,9 @@ import type {
   TemplateSummary,
   WorkoutSession,
 } from './types'
+
+// Re-exported so components import domain types from one place.
+export type { CurrentUser }
 
 const BASE = '/api'
 
@@ -35,14 +39,33 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * CSRF token holder.
+ *
+ * Stored in a module variable rather than a cookie: the server compares it to the
+ * value bound to the session, and a cross-site page cannot read it. Set by the
+ * auth provider after login and after a reload.
+ */
+let csrfToken = ''
+
+export function setCSRFToken(token: string): void {
+  csrfToken = token
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? 'GET').toUpperCase()
+  const needsCSRF = !['GET', 'HEAD', 'OPTIONS'].includes(method)
   let response: Response
   try {
     response = await fetch(`${BASE}${path}`, {
+      // Session cookie travels with the request; the browser sends it because the
+      // API is same-origin (nginx in production, the Vite proxy in development).
+      credentials: 'same-origin',
       ...init,
       headers: {
         Accept: 'application/json',
         ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(needsCSRF && csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
         ...init?.headers,
       },
     })
@@ -56,6 +79,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   const text = await response.text()
   const payload: unknown = text ? safeParse(text) : null
+
+  if (response.status === 401) {
+    // The session ended (expired, revoked, or the account was disabled). Signal it
+    // so the shell can return to the login screen instead of showing empty data.
+    window.dispatchEvent(new Event('ironnote:unauthorized'))
+  }
 
   if (!response.ok) {
     const parsed = payload as ApiErrorPayload | null
@@ -93,6 +122,45 @@ function query(params: Record<string, string | number | boolean | undefined | nu
 
 const json = (body: unknown): RequestInit => ({ body: JSON.stringify(body) })
 
+// --- authentication --------------------------------------------------------
+
+export const authApi = {
+  login: async (username: string, password: string) => {
+    const result = await request<{ user: CurrentUser; csrfToken: string }>('/auth/login', {
+      method: 'POST',
+      ...json({ username, password }),
+    })
+    setCSRFToken(result.csrfToken)
+    return result
+  },
+  logout: (csrf: string) =>
+    request<void>('/auth/logout', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrf },
+    }),
+  me: async () => {
+    const result = await request<{ user: CurrentUser; csrfToken: string }>('/auth/me')
+    setCSRFToken(result.csrfToken)
+    return result
+  },
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ status: string }>('/auth/password', {
+      method: 'POST',
+      ...json({ currentPassword, newPassword }),
+    }),
+}
+
+export const usersApi = {
+  list: () => request<{ items: CurrentUser[] }>('/users').then((r) => r.items),
+  create: (body: { username: string; displayName: string; password: string; role: 'admin' | 'user' }) =>
+    request<CurrentUser>('/users', { method: 'POST', ...json(body) }),
+  update: (id: number, body: { displayName?: string; role?: 'admin' | 'user'; isActive?: boolean }) =>
+    request<CurrentUser>(`/users/${id}`, { method: 'PATCH', ...json(body) }),
+  remove: (id: number) => request<void>(`/users/${id}`, { method: 'DELETE' }),
+  resetPassword: (id: number, newPassword: string) =>
+    request<void>(`/users/${id}/password`, { method: 'POST', ...json({ newPassword }) }),
+}
+
 // --- muscle groups ---------------------------------------------------------
 
 export const muscleGroupsApi = {
@@ -110,6 +178,7 @@ export interface ExerciseInput {
   name: string
   description: string
   equipment: string
+  kind: import('./types').ExerciseKind
   muscleGroups: { muscleGroupId: number; isPrimary: boolean }[]
 }
 
@@ -135,6 +204,7 @@ export interface TemplateInput {
     plannedSets: number | null
     plannedReps: number | null
     plannedWeightKg: number | null
+    plannedDurationSeconds: number | null
   }[]
 }
 
@@ -153,6 +223,9 @@ export const templatesApi = {
 export interface SetInput {
   weightKg?: number | null
   repetitions?: number
+  // For timed exercises: seconds, plus an optional distance.
+  durationSeconds?: number | null
+  distanceMeters?: number | null
   isWarmup?: boolean
   isCompleted?: boolean
   copyPrevious?: boolean
@@ -165,7 +238,10 @@ export const sessionsApi = {
   active: () => request<{ session: WorkoutSession | null }>('/sessions/active').then((r) => r.session),
   start: (body: { name?: string; templateId?: number; notes?: string }) =>
     request<WorkoutSession>('/sessions', { method: 'POST', ...json(body) }),
-  update: (id: number, body: { name?: string; notes?: string; startedAt?: string }) =>
+  update: (
+    id: number,
+    body: { name?: string; notes?: string; startedAt?: string; durationMinutes?: number },
+  ) =>
     request<WorkoutSession>(`/sessions/${id}`, { method: 'PATCH', ...json(body) }),
   finish: (id: number) => request<WorkoutSession>(`/sessions/${id}/finish`, { method: 'POST' }),
   reopen: (id: number) => request<WorkoutSession>(`/sessions/${id}/reopen`, { method: 'POST' }),

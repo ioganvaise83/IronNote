@@ -7,6 +7,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { PageHeader } from '../components/AppShell'
 import { Button, Card, ErrorBanner, Field, Input, Skeleton } from '../components/ui'
 import { ApiError, exercisesApi, muscleGroupsApi, type ExerciseInput } from '../lib/api'
+import type { ExerciseKind } from '../lib/types'
 import { queryKeys } from '../lib/queryKeys'
 
 export function ExerciseFormPage() {
@@ -19,6 +20,7 @@ export function ExerciseFormPage() {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [equipment, setEquipment] = useState('')
+  const [kind, setKind] = useState<ExerciseKind>('weighted')
   const [selected, setSelected] = useState<number[]>([])
   const [primary, setPrimary] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -38,6 +40,7 @@ export function ExerciseFormPage() {
     setName(exercise.name)
     setDescription(exercise.description)
     setEquipment(exercise.equipment)
+    setKind(exercise.kind)
     setSelected(exercise.muscleGroups.map((group) => group.muscleGroupId))
     setPrimary(exercise.muscleGroups.find((group) => group.isPrimary)?.muscleGroupId ?? null)
     setLoaded(true)
@@ -81,6 +84,7 @@ export function ExerciseFormPage() {
       name: name.trim(),
       description: description.trim(),
       equipment: equipment.trim(),
+      kind,
       muscleGroups: selected.map((muscleGroupId) => ({
         muscleGroupId,
         isPrimary: muscleGroupId === primary,
@@ -129,6 +133,23 @@ export function ExerciseFormPage() {
             placeholder="Короткое описание"
             className="field resize-none py-2"
           />
+        </Field>
+
+        <Field
+          label="Тип упражнения"
+          hint={
+            kind === 'duration'
+              ? 'Кардио: бег, плавание, эллипсоид. Записывается время и, по желанию, дистанция.'
+              : kind === 'bodyweight'
+                ? 'С собственным весом: подтягивания, отжимания. Записываются только повторения.'
+                : 'С весом: штанга, гантели, тренажёр. Записываются вес и повторения.'
+          }
+        >
+          <select value={kind} onChange={(event) => setKind(event.target.value as ExerciseKind)} className="field">
+            <option value="weighted">С весом (вес × повторения)</option>
+            <option value="bodyweight">С собственным весом (только повторения)</option>
+            <option value="duration">На время (бег, плавание, кардио)</option>
+          </select>
         </Field>
 
         <Field label="Снаряжение" hint="Необязательно: штанга, гантели, тренажёр…">

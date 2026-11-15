@@ -11,8 +11,11 @@ function makeSet(overrides: Partial<WorkoutSet> = {}): WorkoutSet {
   return {
     id: 1,
     setNumber: 1,
+    kind: 'weighted',
     weightKg: 80,
     repetitions: 10,
+    durationSeconds: null,
+    distanceMeters: null,
     isWarmup: false,
     isCompleted: true,
     ...overrides,

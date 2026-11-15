@@ -5,8 +5,67 @@
 package store
 
 import (
+	"database/sql/driver"
+	"fmt"
+
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+type ExerciseKind string
+
+const (
+	ExerciseKindWeighted   ExerciseKind = "weighted"
+	ExerciseKindBodyweight ExerciseKind = "bodyweight"
+	ExerciseKindDuration   ExerciseKind = "duration"
+)
+
+func (e *ExerciseKind) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ExerciseKind(s)
+	case string:
+		*e = ExerciseKind(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ExerciseKind: %T", src)
+	}
+	return nil
+}
+
+type NullExerciseKind struct {
+	ExerciseKind ExerciseKind
+	Valid        bool // Valid is true if ExerciseKind is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullExerciseKind) Scan(value interface{}) error {
+	if value == nil {
+		ns.ExerciseKind, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ExerciseKind.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullExerciseKind) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ExerciseKind), nil
+}
+
+type AuthSession struct {
+	ID         int64
+	UserID     int64
+	TokenHash  []byte
+	CsrfToken  string
+	CreatedAt  pgtype.Timestamptz
+	LastSeenAt pgtype.Timestamptz
+	ExpiresAt  pgtype.Timestamptz
+	RevokedAt  pgtype.Timestamptz
+	IpAddress  *string
+	UserAgent  *string
+}
 
 type Exercise struct {
 	ID          int64
@@ -16,6 +75,7 @@ type Exercise struct {
 	IsArchived  bool
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
+	Kind        ExerciseKind
 }
 
 type ExerciseMuscleGroup struct {
@@ -24,12 +84,35 @@ type ExerciseMuscleGroup struct {
 	IsPrimary     bool
 }
 
+type LoginAttempt struct {
+	ID          int64
+	AttemptKey  string
+	AttemptedAt pgtype.Timestamptz
+	Succeeded   bool
+}
+
 type MuscleGroup struct {
 	ID          int64
 	Name        string
 	Description *string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
+}
+
+type User struct {
+	ID                 int64
+	Username           string
+	UsernameKey        *string
+	DisplayName        string
+	PasswordHash       string
+	Role               string
+	IsActive           bool
+	MustChangePassword bool
+	FailedLoginCount   int32
+	LockedUntil        pgtype.Timestamptz
+	LastLoginAt        pgtype.Timestamptz
+	CreatedAt          pgtype.Timestamptz
+	UpdatedAt          pgtype.Timestamptz
 }
 
 type WorkoutSession struct {
@@ -42,6 +125,7 @@ type WorkoutSession struct {
 	Notes      string
 	CreatedAt  pgtype.Timestamptz
 	UpdatedAt  pgtype.Timestamptz
+	UserID     int64
 }
 
 type WorkoutSessionExercise struct {
@@ -57,9 +141,12 @@ type WorkoutSet struct {
 	WorkoutExerciseID int64
 	SetNumber         int32
 	WeightKg          pgtype.Numeric
-	Repetitions       int16
+	Repetitions       *int16
 	IsWarmup          bool
 	IsCompleted       bool
+	DurationSeconds   *int32
+	DistanceMeters    pgtype.Numeric
+	Kind              ExerciseKind
 }
 
 type WorkoutTemplate struct {
@@ -68,14 +155,16 @@ type WorkoutTemplate struct {
 	Description string
 	CreatedAt   pgtype.Timestamptz
 	UpdatedAt   pgtype.Timestamptz
+	UserID      int64
 }
 
 type WorkoutTemplateExercise struct {
-	ID              int64
-	TemplateID      int64
-	ExerciseID      int64
-	SortOrder       int32
-	PlannedSets     *int32
-	PlannedReps     *int32
-	PlannedWeightKg pgtype.Numeric
+	ID                     int64
+	TemplateID             int64
+	ExerciseID             int64
+	SortOrder              int32
+	PlannedSets            *int32
+	PlannedReps            *int32
+	PlannedWeightKg        pgtype.Numeric
+	PlannedDurationSeconds *int32
 }

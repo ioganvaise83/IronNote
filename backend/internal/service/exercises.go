@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ioganvaise83/ironnote/internal/apperror"
+	"github.com/ioganvaise83/ironnote/internal/auth"
 	"github.com/ioganvaise83/ironnote/internal/store"
 )
 
@@ -21,6 +22,7 @@ type ExerciseInput struct {
 	Name         string
 	Description  string
 	Equipment    string
+	Kind         ExerciseKind
 	MuscleGroups []ExerciseGroupRef
 }
 
@@ -55,10 +57,21 @@ func (in ExerciseInput) Validate() error {
 	if primary > 1 {
 		details["muscleGroups"] = "Основной может быть только одна группа мышц"
 	}
+	if !validKind(in.Kind) {
+		details["kind"] = "Неизвестный тип упражнения"
+	}
 	if len(details) > 0 {
 		return apperror.Validation("Проверьте поля формы", details)
 	}
 	return nil
+}
+
+func validKind(k ExerciseKind) bool {
+	switch k {
+	case KindWeighted, KindBodyweight, KindDuration:
+		return true
+	}
+	return false
 }
 
 type ExerciseFilter struct {
@@ -78,8 +91,8 @@ func (s *Service) ListExercises(ctx context.Context, f ExerciseFilter) ([]Exerci
 	}
 	out := make([]Exercise, 0, len(rows))
 	for _, r := range rows {
-		ex, err := s.exerciseFromRow(r.ID, r.Name, r.Description, r.Equipment, r.IsArchived,
-			r.CreatedAt.Time, r.UpdatedAt.Time, r.MuscleGroups)
+		ex, err := s.exerciseFromRow(r.ID, r.Name, r.Description, r.Equipment, ParseKind(r.Kind),
+			r.IsArchived, r.CreatedAt.Time, r.UpdatedAt.Time, r.MuscleGroups)
 		if err != nil {
 			return nil, err
 		}
@@ -93,8 +106,8 @@ func (s *Service) GetExercise(ctx context.Context, id int64) (Exercise, error) {
 	if err != nil {
 		return Exercise{}, translate(err, "Упражнение")
 	}
-	return s.exerciseFromRow(r.ID, r.Name, r.Description, r.Equipment, r.IsArchived,
-		r.CreatedAt.Time, r.UpdatedAt.Time, r.MuscleGroups)
+	return s.exerciseFromRow(r.ID, r.Name, r.Description, r.Equipment, ParseKind(r.Kind),
+		r.IsArchived, r.CreatedAt.Time, r.UpdatedAt.Time, r.MuscleGroups)
 }
 
 // muscleGroupJSON mirrors the jsonb_build_object shape in the query.
@@ -104,8 +117,8 @@ type muscleGroupJSON struct {
 	IsPrimary       bool   `json:"isPrimary"`
 }
 
-func (s *Service) exerciseFromRow(id int64, name, description string, equipment *string, archived bool,
-	createdAt, updatedAt time.Time, raw string) (Exercise, error) {
+func (s *Service) exerciseFromRow(id int64, name, description string, equipment *string,
+	kind ExerciseKind, archived bool, createdAt, updatedAt time.Time, raw string) (Exercise, error) {
 	groups, err := decodeGroups(raw)
 	if err != nil {
 		return Exercise{}, err
@@ -115,6 +128,7 @@ func (s *Service) exerciseFromRow(id int64, name, description string, equipment 
 		Name:         name,
 		Description:  description,
 		Equipment:    derefString(equipment),
+		Kind:         kind,
 		IsArchived:   archived,
 		MuscleGroups: groups,
 		CreatedAt:    createdAt,
@@ -122,7 +136,10 @@ func (s *Service) exerciseFromRow(id int64, name, description string, equipment 
 	}, nil
 }
 
-func (s *Service) CreateExercise(ctx context.Context, in ExerciseInput) (Exercise, error) {
+func (s *Service) CreateExercise(ctx context.Context, actor auth.Actor, in ExerciseInput) (Exercise, error) {
+	if !actor.IsAdmin() {
+		return Exercise{}, apperror.Forbidden("Только администратор может изменять справочник упражнений")
+	}
 	if err := in.Validate(); err != nil {
 		return Exercise{}, err
 	}
@@ -132,6 +149,7 @@ func (s *Service) CreateExercise(ctx context.Context, in ExerciseInput) (Exercis
 			Name:        strings.TrimSpace(in.Name),
 			Description: in.Description,
 			Equipment:   optionalString(in.Equipment),
+			Kind:        store.ExerciseKind(in.Kind),
 		})
 		if err != nil {
 			return translate(err, "Упражнение")
@@ -145,7 +163,10 @@ func (s *Service) CreateExercise(ctx context.Context, in ExerciseInput) (Exercis
 	return s.GetExercise(ctx, id)
 }
 
-func (s *Service) UpdateExercise(ctx context.Context, id int64, in ExerciseInput) (Exercise, error) {
+func (s *Service) UpdateExercise(ctx context.Context, actor auth.Actor, id int64, in ExerciseInput) (Exercise, error) {
+	if !actor.IsAdmin() {
+		return Exercise{}, apperror.Forbidden("Только администратор может изменять справочник упражнений")
+	}
 	if err := in.Validate(); err != nil {
 		return Exercise{}, err
 	}
@@ -155,6 +176,7 @@ func (s *Service) UpdateExercise(ctx context.Context, id int64, in ExerciseInput
 			Name:        strings.TrimSpace(in.Name),
 			Description: in.Description,
 			Equipment:   optionalString(in.Equipment),
+			Kind:        store.ExerciseKind(in.Kind),
 		}); err != nil {
 			return translate(err, "Упражнение")
 		}
@@ -185,7 +207,10 @@ func (s *Service) replaceGroups(ctx context.Context, q *store.Queries, exerciseI
 // DeleteExercise removes an exercise only while it has no history. Once it is
 // used by a workout or template the historical record must keep its name, so the
 // user is steered to archive instead.
-func (s *Service) DeleteExercise(ctx context.Context, id int64) error {
+func (s *Service) DeleteExercise(ctx context.Context, actor auth.Actor, id int64) error {
+	if !actor.IsAdmin() {
+		return apperror.Forbidden("Только администратор может удалять упражнения")
+	}
 	usage, err := s.q.CountExerciseHistory(ctx, id)
 	if err != nil {
 		return apperror.Internal(err)
@@ -203,7 +228,10 @@ func (s *Service) DeleteExercise(ctx context.Context, id int64) error {
 	return nil
 }
 
-func (s *Service) SetExerciseArchived(ctx context.Context, id int64, archived bool) (Exercise, error) {
+func (s *Service) SetExerciseArchived(ctx context.Context, actor auth.Actor, id int64, archived bool) (Exercise, error) {
+	if !actor.IsAdmin() {
+		return Exercise{}, apperror.Forbidden("Только администратор может архивировать упражнения")
+	}
 	if _, err := s.q.SetExerciseArchived(ctx, store.SetExerciseArchivedParams{ID: id, IsArchived: archived}); err != nil {
 		return Exercise{}, translate(err, "Упражнение")
 	}

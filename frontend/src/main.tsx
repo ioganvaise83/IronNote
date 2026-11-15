@@ -3,10 +3,11 @@ import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from 'react-router-dom'
 import { router } from './router'
+import { AuthProvider } from './lib/auth'
 import './index.css'
 
-// Sensible defaults for a personal log: server data stays fresh briefly, and a
-// failed request retries once (a phone in a gym loses signal often).
+// A 401 from any request means the session ended: the auth provider listens for
+// this event and returns the user to the login screen.
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -24,7 +25,9 @@ if (!container) throw new Error('Root element #root not found')
 createRoot(container).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      <AuthProvider>
+        <RouterProvider router={router} />
+      </AuthProvider>
     </QueryClientProvider>
   </StrictMode>,
 )

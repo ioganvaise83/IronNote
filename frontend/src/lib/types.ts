@@ -3,6 +3,28 @@
 // These mirror the JSON contract exactly. Weight and repetitions are nullable on
 // purpose: a bodyweight set has no weight, and that is different from zero.
 
+export type UserRole = 'admin' | 'user'
+
+/**
+ * What a movement measures.
+ * - weighted: weight × repetitions (жим, приседания)
+ * - bodyweight: repetitions only (подтягивания, отжимания)
+ * - duration: time, optionally distance (бег, плавание, эллипсоид)
+ */
+export type ExerciseKind = 'weighted' | 'bodyweight' | 'duration'
+
+export interface CurrentUser {
+  id: number
+  username: string
+  displayName: string
+  role: UserRole
+  isActive: boolean
+  mustChangePassword: boolean
+  lastLoginAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
 export interface MuscleGroup {
   id: number
   name: string
@@ -22,6 +44,7 @@ export interface Exercise {
   name: string
   description: string
   equipment: string
+  kind: ExerciseKind
   isArchived: boolean
   muscleGroups: ExerciseGroup[]
   createdAt: string
@@ -37,6 +60,7 @@ export interface TemplateExercise {
   plannedSets: number | null
   plannedReps: number | null
   plannedWeightKg: number | null
+  plannedDurationSeconds: number | null
 }
 
 export interface Template {
@@ -61,8 +85,12 @@ export interface TemplateSummary {
 export interface WorkoutSet {
   id: number
   setNumber: number
+  kind: ExerciseKind
   weightKg: number | null
+  /** 0 for a timed set: the server sends 0 because repetitions is nullable. */
   repetitions: number
+  durationSeconds: number | null
+  distanceMeters: number | null
   isWarmup: boolean
   isCompleted: boolean
 }
@@ -72,6 +100,7 @@ export interface SessionExercise {
   exerciseId: number
   exerciseName: string
   equipment: string
+  kind: ExerciseKind
   exerciseArchived: boolean
   sortOrder: number
   notes: string
@@ -94,6 +123,9 @@ export interface WorkoutSession {
   exerciseCount: number
   completedSetCount: number
   volumeKg: number
+  /** Total time recorded by timed sets, not the wall-clock workout length. */
+  durationSeconds: number
+  distanceMeters: number
   durationMinutes: number | null
 }
 
@@ -108,6 +140,9 @@ export interface SessionSummary {
   exerciseCount: number
   completedSetCount: number
   volumeKg: number
+  /** Total time recorded by timed sets, not the wall-clock workout length. */
+  durationSeconds: number
+  distanceMeters: number
   durationMinutes: number | null
 }
 
@@ -124,6 +159,8 @@ export interface StatsSummary {
   volumeKg: number
   exerciseCount: number
   averageDurationMinutes: number
+  totalSeconds: number
+  totalMeters: number
   monthly: MonthlyPoint[]
 }
 
@@ -136,6 +173,9 @@ export interface ExerciseBest {
   maxSingleKg: number | null
   estimated1RMKg: number | null
   bestSetVolumeKg: number | null
+  totalSeconds: number
+  totalMeters: number
+  longestSeconds: number | null
   lastPerformedAt: string | null
 }
 
@@ -145,6 +185,8 @@ export interface ExerciseSeriesPoint {
   volumeKg: number
   maxWeightKg: number | null
   estimated1RMKg: number | null
+  seconds: number
+  meters: number
 }
 
 export interface SetHistoryEntry {
@@ -153,6 +195,8 @@ export interface SetHistoryEntry {
   setNumber: number
   weightKg: number | null
   repetitions: number
+  durationSeconds: number | null
+  distanceMeters: number | null
   isWarmup: boolean
 }
 
@@ -167,6 +211,9 @@ export interface ExerciseStats {
   estimated1RMKg: number | null
   totalVolumeKg: number
   totalSets: number
+  totalSeconds: number
+  totalMeters: number
+  longestSeconds: number | null
   recentSets: SetHistoryEntry[]
 }
 

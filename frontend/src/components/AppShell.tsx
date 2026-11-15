@@ -4,8 +4,10 @@
 // Desktop (lg+): the same five destinations become a left sidebar. One source of
 // truth for the routes keeps the two from drifting apart.
 
-import { NavLink, Outlet, useLocation } from 'react-router-dom'
-import type { ReactNode } from 'react'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { useState, type ReactNode } from 'react'
+import { useAuth } from '../lib/auth'
+import { Button } from './ui'
 
 interface NavItem {
   to: string
@@ -78,8 +80,11 @@ export function AppShell() {
           {NAV_ITEMS.map((item) => (
             <SidebarLink key={item.to} item={item} />
           ))}
+          <AdminSidebarLink />
         </nav>
-        <div className="mt-auto px-5 py-4 text-xs text-ink-faint">Личный дневник тренировок</div>
+        <div className="mt-auto px-3 pb-4">
+          <AccountCard />
+        </div>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -142,6 +147,30 @@ function SidebarLink({ item }: { item: NavItem }) {
   )
 }
 
+/** Admin-only destination, kept out of NAV_ITEMS so normal users never see it. */
+function AdminSidebarLink() {
+  const { user } = useAuth()
+  if (user?.role !== 'admin') return null
+  return (
+    <NavLink
+      to="/users"
+      className={({ isActive }) =>
+        `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
+          isActive ? 'bg-accent-soft text-ink' : 'text-ink-muted hover:bg-surface-hover hover:text-ink'
+        }`
+      }
+    >
+      <span className="h-5 w-5">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+          <circle cx="9" cy="8" r="3.2" />
+          <path d="M3.5 19a5.5 5.5 0 0 1 11 0M16 11.2a2.8 2.8 0 1 0 0-5.6M17 19a4.6 4.6 0 0 0-2-3.8" strokeLinecap="round" />
+        </svg>
+      </span>
+      Пользователи
+    </NavLink>
+  )
+}
+
 function BottomLink({ item }: { item: NavItem }) {
   return (
     <NavLink
@@ -197,3 +226,58 @@ export function PageHeader({
     </header>
   )
 }
+
+/**
+ * Signed-in identity, logout and the admin-only Users link.
+ *
+ * Rendered twice (sidebar and mobile settings entry) so it lives in one
+ * component; the caller decides placement.
+ */
+function AccountCard() {
+  const { user, logout } = useAuth()
+  const navigate = useNavigate()
+  const [busy, setBusy] = useState(false)
+
+  if (!user) return null
+
+  async function signOut() {
+    setBusy(true)
+    try {
+      await logout()
+      navigate('/login', { replace: true })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-line bg-surface-raised p-3">
+      <p className="truncate text-sm font-medium">{user.displayName || user.username}</p>
+      <p className="truncate text-xs text-ink-faint">
+        {user.username}
+        {user.role === 'admin' ? ' · администратор' : ''}
+      </p>
+      <div className="mt-2 flex flex-col gap-1">
+        <NavLink
+          to="/change-password"
+          className="rounded-lg px-2 py-1.5 text-xs text-ink-muted hover:bg-surface-hover hover:text-ink"
+        >
+          Сменить пароль
+        </NavLink>
+        {user.role === 'admin' && (
+          <NavLink
+            to="/users"
+            className="rounded-lg px-2 py-1.5 text-xs text-ink-muted hover:bg-surface-hover hover:text-ink"
+          >
+            Пользователи
+          </NavLink>
+        )}
+        <Button variant="ghost" className="justify-start px-2 text-xs" onClick={() => void signOut()} loading={busy}>
+          Выйти
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+export { AccountCard }

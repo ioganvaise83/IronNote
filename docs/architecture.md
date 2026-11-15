@@ -34,9 +34,10 @@ migrations       schema + seed, applied by an embedded migrate runner on boot
 ```
 
 Access to data is separated from business logic. `store` only knows SQL;
-`service` only knows rules and interfaces; `api` only knows HTTP. Single-user MVP
-means no `user_id` today, but every list query already goes through the service
-layer, so introducing an owner scope later is a filter, not a rewrite.
+`service` only knows rules and interfaces; `api` only knows HTTP. The authenticated
+caller is resolved once per request by middleware into `auth.Actor` and passed
+explicitly into the service layer, so no handler can accidentally act without an
+owner. See [security.md](security.md) for the authorisation model.
 
 ## Data model
 
@@ -44,6 +45,15 @@ Nine tables. Everything historical is protected from cascading deletes of
 reference data.
 
 ```text
+users                    auth_sessions             login_attempts
+  id (pk)                  id (pk)                   id (pk)
+  username (ci-unique)     user_id FK CASCADE        attempt_key (hashed)
+  password_hash (argon2id) token_hash BYTEA           attempted_at
+  role admin|user          csrf_token                succeeded
+  is_active                expires_at / revoked_at
+  must_change_password     ip_address, user_agent
+  failed_login_count, locked_until
+
 muscle_groups            exercises                 exercise_muscle_groups
   id (pk)                  id (pk)                   exercise_id  ─┐ FK RESTRICT
   name (unique)            name                      muscle_group_id ─┘ FK CASCADE
@@ -61,13 +71,13 @@ workout_templates            workout_template_exercises
 
 workout_sessions             workout_session_exercises      workout_sets
   id (pk)                      id (pk)                        id (pk)
-  template_id FK SET NULL      workout_session_id FK CASCADE  workout_exercise_id FK CASCADE
-  name                         exercise_id FK RESTRICT        set_number
+  user_id FK CASCADE ◄── owner workout_session_id FK CASCADE  workout_exercise_id FK CASCADE
+  template_id FK SET NULL      exercise_id FK RESTRICT        set_number
+  name                                                        weight_kg NUMERIC(7,3)
   started_at timestamptz       sort_order                     weight_kg NUMERIC(7,3)
   finished_at timestamptz      notes                          repetitions  smallint
   status in_progress|completed                                is_warmup boolean
   notes                                                       is_completed boolean
-  created_at/updated_at
 ```
 
 Decisions that matter:
@@ -86,11 +96,21 @@ Decisions that matter:
 - **Set identity.** `set_number` is a display order within an exercise, unique per
   exercise (`UNIQUE (workout_exercise_id, set_number)`); renumbering happens in a
   transaction when a set is deleted.
+- **Three kinds of movement.** `exercises.kind` is `weighted` (weight × reps),
+  `bodyweight` (reps only) or `duration` (seconds, optional metres). The kind is
+  copied to `workout_sets.kind` so history is self-describing, and the database
+  enforces which measure each row must carry: a timed set needs a duration, a
+  strength set needs repetitions.
 - **Weight may be NULL** for bodyweight work; volume sums only completed,
-  non-warmup sets that have a weight, exactly as the requirements state.
-- **One in-flight session** is allowed by a partial unique index
-  (`status = 'in_progress'`), which makes "resume where you left off" a single
-  unambiguous lookup and prevents two half-finished workouts.
+  non-warmup sets that have a weight, exactly as the requirements state. Timed
+  sets contribute time and distance, never volume.
+- **One in-flight session per user** is allowed by a partial unique index on
+  `(user_id) WHERE status = 'in_progress'`, so "resume where you left off" stays
+  unambiguous for each person independently.
+- **Ownership is a column, not a convention.** `workout_sessions.user_id` and
+  `workout_templates.user_id` are `NOT NULL` with a foreign key; the queries that
+  read them always filter by the acting user, and there is no unscoped
+  "get by id" query to forget the filter on.
 
 ## Statistics definitions
 

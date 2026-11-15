@@ -7,9 +7,12 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -18,47 +21,105 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ioganvaise83/ironnote/internal/apperror"
+	"github.com/ioganvaise83/ironnote/internal/auth"
 	"github.com/ioganvaise83/ironnote/internal/database"
 	"github.com/ioganvaise83/ironnote/internal/service"
 )
 
 type Server struct {
-	svc         *service.Service
-	log         *slog.Logger
-	pool        *pgxpool.Pool
-	version     string
-	startedAt   time.Time
-	corsOrigins []string
+	svc     *service.Service
+	auth    *auth.Service
+	log     *slog.Logger
+	pool    *pgxpool.Pool
+	version string
+	// secureCookies marks the session cookie Secure; enabled when TLS is in front.
+	secureCookies bool
+	// publicOrigin is the canonical https:// origin, used to validate Origin on
+	// state-changing requests.
+	publicOrigin   string
+	trustedProxies []*net.IPNet
+	startedAt      time.Time
+	corsOrigins    []string
+	// Rate limiters. Login is deliberately much stricter than general traffic.
+	loginLimiter  *rateLimiter
+	globalLimiter *rateLimiter
 }
 
 type Options struct {
-	Service     *service.Service
-	Logger      *slog.Logger
-	Pool        *pgxpool.Pool
-	Version     string
-	CORSOrigins []string
+	Service        *service.Service
+	Auth           *auth.Service
+	Logger         *slog.Logger
+	Pool           *pgxpool.Pool
+	Version        string
+	CORSOrigins    []string
+	SecureCookies  bool
+	PublicOrigin   string
+	TrustedProxies []string
 }
 
 func NewServer(opts Options) *Server {
 	return &Server{
-		svc:         opts.Service,
-		log:         opts.Logger,
-		pool:        opts.Pool,
-		version:     opts.Version,
-		startedAt:   time.Now(),
-		corsOrigins: opts.CORSOrigins,
+		svc:            opts.Service,
+		auth:           opts.Auth,
+		log:            opts.Logger,
+		pool:           opts.Pool,
+		version:        opts.Version,
+		startedAt:      time.Now(),
+		corsOrigins:    opts.CORSOrigins,
+		secureCookies:  opts.SecureCookies,
+		publicOrigin:   strings.TrimRight(opts.PublicOrigin, "/"),
+		trustedProxies: parseCIDRs(opts.TrustedProxies),
+		// Login allows a burst of 20 then 10/min. Deliberately larger than the
+		// per-account lockout threshold (5): a family shares one public IP, so a
+		// tight per-IP budget would lock the household out before the real defence
+		// — the per-account lockout — ever engaged.
+		loginLimiter:  newRateLimiter(10.0/60.0, 20),
+		globalLimiter: newRateLimiter(2.0, 120),
 	}
+}
+
+// parseCIDRs accepts plain IPs too ("127.0.0.1" means 127.0.0.1/32), because an
+// operator will write the former.
+func parseCIDRs(values []string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(values))
+	for _, raw := range values {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		if !strings.Contains(v, "/") {
+			if ip := net.ParseIP(v); ip != nil {
+				bits := 32
+				if ip.To4() == nil {
+					bits = 128
+				}
+				_, network, err := net.ParseCIDR(fmt.Sprintf("%s/%d", ip.String(), bits))
+				if err == nil {
+					out = append(out, network)
+				}
+			}
+			continue
+		}
+		if _, network, err := net.ParseCIDR(v); err == nil {
+			out = append(out, network)
+		}
+	}
+	return out
 }
 
 // Router builds the full API tree with its middleware stack.
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 
+	// RealIP is deliberately NOT used: it trusts X-Forwarded-For from anyone, which
+	// would make per-IP rate limiting trivially bypassable. clientIP does it
+	// correctly, only for configured proxies.
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	r.Use(s.securityHeaders)
 	r.Use(s.logRequests)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
+	r.Use(withTimeout)
+	r.Use(s.authenticate)
 
 	if len(s.corsOrigins) > 0 {
 		r.Use(cors.Handler(cors.Options{
@@ -74,57 +135,74 @@ func (s *Server) Router() http.Handler {
 	r.Get("/readyz", s.handleReady)
 
 	r.Route("/api", func(r chi.Router) {
-		r.Get("/meta", s.handleMeta)
-
-		r.Route("/muscle-groups", func(r chi.Router) {
-			r.Get("/", s.handleListMuscleGroups)
-			r.Post("/", s.handleCreateMuscleGroup)
-			r.Get("/{id}", s.handleGetMuscleGroup)
-			r.Patch("/{id}", s.handleUpdateMuscleGroup)
-			r.Delete("/{id}", s.handleDeleteMuscleGroup)
+		// Public: reachable without a session, heavily throttled.
+		r.Group(func(r chi.Router) {
+			r.Use(s.rateLimit(s.loginLimiter, "Слишком много попыток входа. Попробуйте через минуту."))
+			r.Post("/auth/login", s.handleLogin)
 		})
 
-		r.Route("/exercises", func(r chi.Router) {
-			r.Get("/", s.handleListExercises)
-			r.Post("/", s.handleCreateExercise)
-			r.Get("/{id}", s.handleGetExercise)
-			r.Patch("/{id}", s.handleUpdateExercise)
-			r.Delete("/{id}", s.handleDeleteExercise)
-			r.Post("/{id}/archive", s.handleArchiveExercise)
-			r.Post("/{id}/unarchive", s.handleUnarchiveExercise)
+		// Everything below needs a session.
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireAuth)
+
+			r.Get("/meta", s.handleMeta)
+			r.Get("/auth/me", s.handleMe)
+
+			// Session-mutating endpoints are CSRF-protected like every other write:
+			// a cross-site form must not be able to log the user out or push a
+			// password change, even though both require the session cookie.
+			r.Group(func(r chi.Router) {
+				r.Use(s.requireCSRF)
+				r.Post("/auth/logout", s.handleLogout)
+				r.Post("/auth/password", s.handleChangePassword)
+			})
+
+			// Writes additionally need the CSRF token.
+			r.Group(func(r chi.Router) {
+				r.Use(s.requireCSRF)
+				r.Use(s.rateLimit(s.globalLimiter, "Слишком много запросов"))
+				s.adminAndTrainingRoutes(r)
+			})
 		})
 
-		r.Route("/templates", func(r chi.Router) {
-			r.Get("/", s.handleListTemplates)
-			r.Post("/", s.handleCreateTemplate)
-			r.Get("/{id}", s.handleGetTemplate)
-			r.Put("/{id}", s.handleUpdateTemplate)
-			r.Delete("/{id}", s.handleDeleteTemplate)
-			r.Post("/{id}/start", s.handleStartFromTemplate)
+		// Admin-only surface. requireAdmin is the route-level guard; the service
+		// layer checks the role again.
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireAuth)
+			r.Use(s.requireAdmin)
+			r.Use(s.requireCSRF)
+			r.Use(s.rateLimit(s.globalLimiter, "Слишком много запросов"))
+
+			r.Route("/users", func(r chi.Router) {
+				r.Get("/", s.handleListUsers)
+				r.Post("/", s.handleCreateUser)
+				r.Patch("/{id}", s.handleUpdateUser)
+				r.Delete("/{id}", s.handleDeleteUser)
+				r.Post("/{id}/password", s.handleResetUserPassword)
+			})
+
+			// Catalogue writes.
+			r.Post("/muscle-groups", s.handleCreateMuscleGroup)
+			r.Patch("/muscle-groups/{id}", s.handleUpdateMuscleGroup)
+			r.Delete("/muscle-groups/{id}", s.handleDeleteMuscleGroup)
+			r.Post("/exercises", s.handleCreateExercise)
+			r.Patch("/exercises/{id}", s.handleUpdateExercise)
+			r.Delete("/exercises/{id}", s.handleDeleteExercise)
+			r.Post("/exercises/{id}/archive", s.handleArchiveExercise)
+			r.Post("/exercises/{id}/unarchive", s.handleUnarchiveExercise)
 		})
 
-		r.Route("/sessions", func(r chi.Router) {
-			r.Get("/", s.handleListSessions)
-			r.Post("/", s.handleStartSession)
-			r.Get("/active", s.handleActiveSession)
-			r.Get("/{id}", s.handleGetSession)
-			r.Patch("/{id}", s.handleUpdateSession)
-			r.Delete("/{id}", s.handleDeleteSession)
-			r.Post("/{id}/finish", s.handleFinishSession)
-			r.Post("/{id}/reopen", s.handleReopenSession)
-			r.Post("/{id}/exercises", s.handleAddSessionExercise)
-			r.Patch("/{id}/exercises/{exerciseId}", s.handleMoveSessionExercise)
-			r.Delete("/{id}/exercises/{exerciseId}", s.handleDeleteSessionExercise)
-			r.Patch("/{id}/exercises/{exerciseId}/notes", s.handleSessionExerciseNotes)
-			r.Post("/{id}/exercises/{exerciseId}/sets", s.handleAddSet)
-			r.Patch("/{id}/exercises/{exerciseId}/sets/{setId}", s.handleUpdateSet)
-			r.Delete("/{id}/exercises/{exerciseId}/sets/{setId}", s.handleDeleteSet)
+		// Catalogue reads stay open to every signed-in user.
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireAuth)
+			r.Get("/muscle-groups", s.handleListMuscleGroups)
+			r.Get("/muscle-groups/{id}", s.handleGetMuscleGroup)
+			r.Get("/exercises", s.handleListExercises)
+			r.Get("/exercises/{id}", s.handleGetExercise)
 		})
 
-		r.Route("/stats", func(r chi.Router) {
-			r.Get("/summary", s.handleStatsSummary)
-			r.Get("/exercises", s.handleExerciseBests)
-			r.Get("/exercises/{id}", s.handleExerciseStats)
+		r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, r, s.log, apperror.New(apperror.CodeNotFound, "Маршрут не найден"))
 		})
 	})
 

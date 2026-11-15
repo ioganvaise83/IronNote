@@ -43,10 +43,30 @@ func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
+// Migrator hooks let the caller prepare data that a later migration depends on.
+//
+// The ownership migration attributes existing history to an admin account, so the
+// admin must exist first. Expressing that inside SQL would mean duplicating the
+// Argon2 hashing in PL/pgSQL; a typed hook keeps one implementation of it.
+type Migrator struct {
+	Logger *slog.Logger
+	// AfterMigration runs inside the same run, after the named migration is
+	// committed. Errors abort the whole run and leave later migrations unapplied.
+	AfterMigration map[string]func(context.Context, *pgxpool.Pool) error
+}
+
 // Migrate applies every embedded migration exactly once, inside a transaction per
 // file, and records the version in schema_migrations. It is safe to run on every
 // boot and concurrent starts are serialised with an advisory lock.
 func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
+	return MigrateWithHooks(ctx, pool, Migrator{Logger: logger})
+}
+
+func MigrateWithHooks(ctx context.Context, pool *pgxpool.Pool, m Migrator) error {
+	logger := m.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire connection: %w", err)
@@ -127,6 +147,13 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error
 			return fmt.Errorf("commit migration %s: %w", name, err)
 		}
 		logger.Info("migration applied", "version", version)
+
+		if hook, ok := m.AfterMigration[version]; ok {
+			if err := hook(ctx, pool); err != nil {
+				return fmt.Errorf("post-migration hook for %s: %w", version, err)
+			}
+			logger.Info("post-migration hook completed", "version", version)
+		}
 	}
 	return nil
 }

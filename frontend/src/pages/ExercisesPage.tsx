@@ -8,12 +8,14 @@ import { PageHeader } from '../components/AppShell'
 import { Badge, Button, Card, EmptyState, ErrorBanner, Input, Skeleton } from '../components/ui'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ApiError, exercisesApi, muscleGroupsApi } from '../lib/api'
+import { useIsAdmin } from '../lib/auth'
 import type { Exercise } from '../lib/types'
 import { plural } from '../lib/format'
 import { queryKeys } from '../lib/queryKeys'
 
 export function ExercisesPage() {
   const navigate = useNavigate()
+  const isAdmin = useIsAdmin()
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
   const [groupId, setGroupId] = useState<number | undefined>(undefined)
@@ -65,9 +67,11 @@ export function ExercisesPage() {
         title="Упражнения"
         subtitle={`${items.length} ${plural(items.length, 'упражнение', 'упражнения', 'упражнений')}`}
         actions={
-          <Button variant="primary" onClick={() => navigate('/exercises/new')}>
-            Создать
-          </Button>
+          isAdmin ? (
+            <Button variant="primary" onClick={() => navigate('/exercises/new')}>
+              Создать
+            </Button>
+          ) : undefined
         }
       />
 
@@ -135,7 +139,7 @@ export function ExercisesPage() {
                 : 'Добавьте упражнения, которые вы действительно выполняете — их можно будет выбирать в тренировке.'
             }
             action={
-              !search && !groupId ? (
+              isAdmin && !search && !groupId ? (
                 <Button variant="primary" onClick={() => navigate('/exercises/new')}>
                   Создать упражнение
                 </Button>
@@ -201,24 +205,32 @@ export function ExercisesPage() {
                       {exercise.equipment}
                     </p>
                   )}
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <Link to={`/exercises/${exercise.id}`}>
-                      <Button variant="secondary">Изменить</Button>
-                    </Link>
-                    <Button
-                      variant="ghost"
-                      onClick={() => archive.mutate({ id: exercise.id, archived: !exercise.isArchived })}
-                      loading={archive.isPending}
-                    >
-                      {exercise.isArchived ? 'Вернуть из архива' : 'В архив'}
-                    </Button>
-                    <Button variant="ghost" onClick={() => setToDelete(exercise)} className="text-danger">
-                      Удалить
-                    </Button>
-                  </div>
-                  <p className="mt-2 text-xs text-ink-faint">
-                    Упражнение с историей удалить нельзя — используйте архив, чтобы сохранить прошлые тренировки.
-                  </p>
+                  {isAdmin ? (
+                    <>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Link to={`/exercises/${exercise.id}`}>
+                          <Button variant="secondary">Изменить</Button>
+                        </Link>
+                        <Button
+                          variant="ghost"
+                          onClick={() => archive.mutate({ id: exercise.id, archived: !exercise.isArchived })}
+                          loading={archive.isPending}
+                        >
+                          {exercise.isArchived ? 'Вернуть из архива' : 'В архив'}
+                        </Button>
+                        <Button variant="ghost" onClick={() => setToDelete(exercise)} className="text-danger">
+                          Удалить
+                        </Button>
+                      </div>
+                      <p className="mt-2 text-xs text-ink-faint">
+                        Упражнение с историей удалить нельзя — используйте архив, чтобы сохранить прошлые тренировки.
+                      </p>
+                    </>
+                  ) : (
+                    <p className="mt-3 text-xs text-ink-faint">
+                      Справочник ведёт администратор. Если упражнения не хватает — попросите его добавить.
+                    </p>
+                  )}
                 </div>
               )}
             </Card>

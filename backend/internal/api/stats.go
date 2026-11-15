@@ -51,7 +51,7 @@ func (s *Server) handleStatsSummary(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.log, err)
 		return
 	}
-	summary, err := s.svc.SummaryStats(r.Context(), period)
+	summary, err := s.svc.SummaryStats(r.Context(), mustActor(r), period)
 	if err != nil {
 		writeError(w, r, s.log, err)
 		return
@@ -64,6 +64,8 @@ func (s *Server) handleStatsSummary(w http.ResponseWriter, r *http.Request) {
 		"volumeKg":               summary.VolumeKg,
 		"exerciseCount":          summary.ExerciseCount,
 		"averageDurationMinutes": summary.AverageDurationMinutes,
+		"totalSeconds":           summary.TotalSeconds,
+		"totalMeters":            summary.TotalMeters,
 		"monthly":                summary.Monthly,
 	})
 }
@@ -74,7 +76,7 @@ func (s *Server) handleExerciseBests(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.log, err)
 		return
 	}
-	items, err := s.svc.ExerciseBests(r.Context(), period)
+	items, err := s.svc.ExerciseBests(r.Context(), mustActor(r), period)
 	if err != nil {
 		writeError(w, r, s.log, err)
 		return
@@ -106,7 +108,7 @@ func (s *Server) handleExerciseStats(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = int32(parsed)
 	}
-	stats, err := s.svc.ExerciseStatsFor(r.Context(), id, period, limit)
+	stats, err := s.svc.ExerciseStatsFor(r.Context(), mustActor(r), id, period, limit)
 	if err != nil {
 		writeError(w, r, s.log, err)
 		return
@@ -122,6 +124,10 @@ func (s *Server) handleExerciseStats(w http.ResponseWriter, r *http.Request) {
 		"estimated1RMKg": stats.Estimated1RMKg,
 		"totalVolumeKg":  stats.TotalVolumeKg,
 		"totalSets":      stats.TotalSets,
+		// Cardio measures, empty for strength exercises.
+		"totalSeconds":   stats.TotalSeconds,
+		"totalMeters":    stats.TotalMeters,
+		"longestSeconds": stats.LongestSeconds,
 		"recentSets":     stats.RecentSets,
 	})
 }

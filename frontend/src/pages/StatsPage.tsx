@@ -21,7 +21,9 @@ import { exercisesApi, statsApi } from '../lib/api'
 import type { StatsPeriod } from '../lib/types'
 import {
   formatDateShort,
+  formatDistance,
   formatNumber,
+  formatSetDuration,
   formatVolume,
   formatWeight,
   monthLabel,
@@ -116,6 +118,12 @@ export function StatsPage() {
                 label="Средняя длительность"
                 value={summary.averageDurationMinutes > 0 ? `${Math.round(summary.averageDurationMinutes)} мин` : '—'}
               />
+              {summary.totalSeconds > 0 && (
+                <Stat label="Время кардио" value={formatSetDuration(summary.totalSeconds)} />
+              )}
+              {summary.totalMeters > 0 && (
+                <Stat label="Дистанция" value={formatDistance(summary.totalMeters)} />
+              )}
             </dl>
           </Card>
 
@@ -180,7 +188,59 @@ export function StatsPage() {
                   </div>
                 )}
 
-                {exerciseQuery.data && exerciseId !== null && (
+                {exerciseQuery.data && exerciseId !== null && isCardio(exerciseQuery.data) && (
+                  <div className="mt-3">
+                    <dl className="grid grid-cols-3 gap-2 text-sm">
+                      <div>
+                        <dt className="text-[11px] uppercase tracking-wide text-ink-faint">Всего времени</dt>
+                        <dd className="font-semibold tabular">{formatSetDuration(exerciseQuery.data.totalSeconds)}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-[11px] uppercase tracking-wide text-ink-faint">Дистанция</dt>
+                        <dd className="font-semibold tabular">{formatDistance(exerciseQuery.data.totalMeters)}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-[11px] uppercase tracking-wide text-ink-faint">Дольше всего</dt>
+                        <dd className="font-semibold tabular text-accent">
+                          {formatSetDuration(exerciseQuery.data.longestSeconds)}
+                        </dd>
+                      </div>
+                    </dl>
+                    <p className="mt-1 text-[11px] text-ink-faint">
+                      Для упражнений на время учитывается длительность, а не вес: объём и 1ПМ к ним не применимы.
+                    </p>
+
+                    {series.length > 0 ? (
+                      <>
+                        <h3 className="mt-4 text-xs font-medium uppercase tracking-wide text-ink-faint">
+                          Время по тренировкам, минуты
+                        </h3>
+                        <div className="h-40 w-full">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <LineChart
+                              data={series.map((p) => ({ ...p, minutes: Math.round(p.seconds / 60) }))}
+                              margin={{ top: 8, right: 8, bottom: 0, left: -12 }}
+                            >
+                              <CartesianGrid stroke="#262c36" strokeDasharray="3 3" vertical={false} />
+                              <XAxis dataKey="label" tick={{ fill: '#9aa4b2', fontSize: 11 }} axisLine={false} tickLine={false} />
+                              <YAxis tick={{ fill: '#6b7482', fontSize: 11 }} axisLine={false} tickLine={false} />
+                              <Tooltip
+                                contentStyle={tooltipStyle}
+                                labelStyle={{ color: '#f2f4f7' }}
+                                formatter={(value: number) => [`${value} мин`, 'время']}
+                              />
+                              <Line type="monotone" dataKey="minutes" stroke="#2f7cf6" strokeWidth={2} dot={{ r: 3, fill: '#2f7cf6' }} />
+                            </LineChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </>
+                    ) : (
+                      <p className="mt-3 text-sm text-ink-muted">Нет данных за выбранный период.</p>
+                    )}
+                  </div>
+                )}
+
+                {exerciseQuery.data && exerciseId !== null && !isCardio(exerciseQuery.data) && (
                   <div className="mt-3">
                     <dl className="grid grid-cols-3 gap-2 text-sm">
                       <div>
@@ -310,10 +370,21 @@ export function StatsPage() {
                           </span>
                         </span>
                         <span className="shrink-0 text-right text-sm">
-                          <span className="block tabular">{formatWeight(item.maxWeightKg)} кг</span>
-                          <span className="block text-xs text-ink-faint">
-                            расч. 1ПМ {formatWeight(item.estimated1RMKg)}
-                          </span>
+                          {item.totalSeconds > 0 || item.maxWeightKg === null ? (
+                            <>
+                              <span className="block tabular">{formatSetDuration(item.totalSeconds)}</span>
+                              <span className="block text-xs text-ink-faint">
+                                {item.totalMeters > 0 ? formatDistance(item.totalMeters) : 'время'}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="block tabular">{formatWeight(item.maxWeightKg)} кг</span>
+                              <span className="block text-xs text-ink-faint">
+                                расч. 1ПМ {formatWeight(item.estimated1RMKg)}
+                              </span>
+                            </>
+                          )}
                         </span>
                       </button>
                     </li>
@@ -335,6 +406,15 @@ const tooltipStyle = {
   fontSize: '12px',
   color: '#f2f4f7',
 } as const
+
+/**
+ * A movement is "cardio" when it recorded time and no load. Exercised on the data
+ * rather than on the catalogue kind, so history keeps working if an exercise is
+ * reclassified later.
+ */
+function isCardio(stats: { totalSeconds: number; maxWeightKg: number | null; totalVolumeKg: number }): boolean {
+  return stats.totalSeconds > 0 && stats.maxWeightKg === null && stats.totalVolumeKg === 0
+}
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (

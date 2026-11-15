@@ -10,6 +10,12 @@
 *oauth*.json
 *.token
 
+# TLS material for the public deployment: certificates are never committed.
+deploy/certs/*
+!deploy/certs/.gitkeep
+*.crt
+*.cer
+
 # Runtime data, databases, logs
 runtime/
 data/

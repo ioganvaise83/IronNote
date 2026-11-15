@@ -6,6 +6,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ioganvaise83/ironnote/internal/apperror"
+	"github.com/ioganvaise83/ironnote/internal/auth"
 	"github.com/ioganvaise83/ironnote/internal/store"
 )
 
@@ -53,7 +54,10 @@ func (in MuscleGroupInput) Validate() error {
 	return nil
 }
 
-func (s *Service) CreateMuscleGroup(ctx context.Context, in MuscleGroupInput) (MuscleGroup, error) {
+func (s *Service) CreateMuscleGroup(ctx context.Context, actor auth.Actor, in MuscleGroupInput) (MuscleGroup, error) {
+	if !actor.IsAdmin() {
+		return MuscleGroup{}, apperror.Forbidden("Только администратор может изменять группы мышц")
+	}
 	if err := in.Validate(); err != nil {
 		return MuscleGroup{}, err
 	}
@@ -71,7 +75,10 @@ func (s *Service) CreateMuscleGroup(ctx context.Context, in MuscleGroupInput) (M
 	return MuscleGroupFromRow(r), nil
 }
 
-func (s *Service) UpdateMuscleGroup(ctx context.Context, id int64, in MuscleGroupInput) (MuscleGroup, error) {
+func (s *Service) UpdateMuscleGroup(ctx context.Context, actor auth.Actor, id int64, in MuscleGroupInput) (MuscleGroup, error) {
+	if !actor.IsAdmin() {
+		return MuscleGroup{}, apperror.Forbidden("Только администратор может изменять группы мышц")
+	}
 	if err := in.Validate(); err != nil {
 		return MuscleGroup{}, err
 	}
@@ -93,7 +100,10 @@ func (s *Service) UpdateMuscleGroup(ctx context.Context, id int64, in MuscleGrou
 // DeleteMuscleGroup refuses to remove a group still attached to exercises: the
 // link table cascades, which would silently strip muscle groups from the
 // catalogue. The user is told what to detach first.
-func (s *Service) DeleteMuscleGroup(ctx context.Context, id int64) error {
+func (s *Service) DeleteMuscleGroup(ctx context.Context, actor auth.Actor, id int64) error {
+	if !actor.IsAdmin() {
+		return apperror.Forbidden("Только администратор может удалять группы мышц")
+	}
 	usage, err := s.q.CountMuscleGroupUsage(ctx, id)
 	if err != nil {
 		return apperror.Internal(err)

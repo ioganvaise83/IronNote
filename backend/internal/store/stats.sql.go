@@ -16,7 +16,7 @@ SELECT
     MIN(started_at)::timestamptz AS first_session_at,
     MAX(started_at)::timestamptz AS last_session_at
 FROM workout_sessions
-WHERE status = 'completed'
+WHERE status = 'completed' AND user_id = $1
 `
 
 type AvailableStatPeriodRow struct {
@@ -24,8 +24,8 @@ type AvailableStatPeriodRow struct {
 	LastSessionAt  pgtype.Timestamptz
 }
 
-func (q *Queries) AvailableStatPeriod(ctx context.Context) (AvailableStatPeriodRow, error) {
-	row := q.db.QueryRow(ctx, availableStatPeriod)
+func (q *Queries) AvailableStatPeriod(ctx context.Context, userID int64) (AvailableStatPeriodRow, error) {
+	row := q.db.QueryRow(ctx, availableStatPeriod, userID)
 	var i AvailableStatPeriodRow
 	err := row.Scan(&i.FirstSessionAt, &i.LastSessionAt)
 	return i, err

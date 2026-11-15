@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ioganvaise83/ironnote/internal/apperror"
+	"github.com/ioganvaise83/ironnote/internal/auth"
 )
 
 // errorBody is the single error shape of the API.
@@ -62,6 +63,17 @@ func writeError(w http.ResponseWriter, r *http.Request, log *slog.Logger, err er
 		Message: appErr.Message,
 		Details: appErr.Details,
 	}})
+}
+
+// mustActor returns the authenticated actor.
+//
+// It is only called from routes that sit behind requireAuth, so the fallback is
+// unreachable; returning a zero Actor rather than panicking keeps a routing
+// mistake from turning into a 500 that reveals a stack trace. The service layer
+// treats a zero id as "no data", never as "everything".
+func mustActor(r *http.Request) auth.Actor {
+	actor, _ := auth.ActorFrom(r.Context())
+	return actor
 }
 
 // timeJSON renders instants as RFC 3339 in UTC. Clients format for display.

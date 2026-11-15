@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,7 +19,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/ioganvaise83/ironnote/internal/api"
+	"github.com/ioganvaise83/ironnote/internal/auth"
 	"github.com/ioganvaise83/ironnote/internal/config"
 	"github.com/ioganvaise83/ironnote/internal/database"
 	"github.com/ioganvaise83/ironnote/internal/service"
@@ -53,23 +57,66 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Refuse an unsafe bootstrap password before touching the database, so a
+	// misconfigured public deployment never comes up at all.
+	if cfg.RequireStrongAdminPassword && auth.IsWeakBootstrapPassword(cfg.AdminPassword) {
+		return fmt.Errorf(
+			"IRONNOTE_ADMIN_PASSWORD is too weak for a public deployment: use at least %d characters "+
+				"with letters and digits, and not a placeholder. Set "+
+				"IRONNOTE_REQUIRE_STRONG_ADMIN_PASSWORD=false only on a trusted local machine",
+			auth.MinPasswordLength)
+	}
+
 	pool, err := database.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
 
-	if err := database.Migrate(ctx, pool, logger); err != nil {
+	authSvc := auth.NewService(pool, logger, auth.DefaultPolicy())
+
+	// The ownership migration backfills existing history to the bootstrap admin,
+	// so that account must exist between 0003 and 0004.
+	migrator := database.Migrator{
+		Logger: logger,
+		AfterMigration: map[string]func(context.Context, *pgxpool.Pool) error{
+			"0003_auth": func(hookCtx context.Context, hookPool *pgxpool.Pool) error {
+				created, err := auth.NewService(hookPool, logger, auth.DefaultPolicy()).
+					BootstrapAdmin(hookCtx, cfg.AdminUsername, cfg.AdminPassword)
+				if err != nil {
+					return err
+				}
+				if created {
+					logger.Warn("bootstrap administrator created; change this password after first login",
+						"username", cfg.AdminUsername)
+				}
+				return nil
+			},
+		},
+	}
+	if err := database.MigrateWithHooks(ctx, pool, migrator); err != nil {
 		return err
+	}
+	// An earlier run may have applied 0003 already, so the hook would not fire;
+	// ensure the account exists either way (the call is idempotent).
+	if created, err := authSvc.BootstrapAdmin(ctx, cfg.AdminUsername, cfg.AdminPassword); err != nil {
+		return fmt.Errorf("bootstrap admin: %w", err)
+	} else if created {
+		logger.Warn("bootstrap administrator created; change this password after first login",
+			"username", cfg.AdminUsername)
 	}
 
 	svc := service.New(pool, logger, cfg.Timezone)
 	server := api.NewServer(api.Options{
-		Service:     svc,
-		Logger:      logger,
-		Pool:        pool,
-		Version:     version,
-		CORSOrigins: splitCORS(os.Getenv("CORS_ALLOWED_ORIGINS")),
+		Service:        svc,
+		Auth:           authSvc,
+		Logger:         logger,
+		Pool:           pool,
+		Version:        version,
+		CORSOrigins:    splitCORS(os.Getenv("CORS_ALLOWED_ORIGINS")),
+		SecureCookies:  cfg.SecureCookies,
+		PublicOrigin:   cfg.PublicOrigin,
+		TrustedProxies: cfg.TrustedProxies,
 	})
 
 	httpServer := &http.Server{

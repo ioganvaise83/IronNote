@@ -18,6 +18,9 @@ const (
 	CodeNotFound     Code = "not_found"
 	CodeConflict     Code = "conflict"
 	CodeRuleViolated Code = "rule_violation"
+	CodeForbidden    Code = "forbidden"
+	CodeUnauthorized Code = "unauthorized"
+	CodeTooMany      Code = "too_many_requests"
 	CodeInternal     Code = "internal_error"
 )
 
@@ -49,6 +52,12 @@ func (e *Error) Status() int {
 		return http.StatusConflict
 	case CodeRuleViolated:
 		return http.StatusUnprocessableEntity
+	case CodeForbidden:
+		return http.StatusForbidden
+	case CodeUnauthorized:
+		return http.StatusUnauthorized
+	case CodeTooMany:
+		return http.StatusTooManyRequests
 	default:
 		return http.StatusInternalServerError
 	}
@@ -72,6 +81,18 @@ func Conflict(message string) *Error {
 
 func Rule(message string) *Error {
 	return &Error{Code: CodeRuleViolated, Message: message}
+}
+
+func Forbidden(message string) *Error {
+	return &Error{Code: CodeForbidden, Message: message}
+}
+
+func Unauthorized(message string) *Error {
+	return &Error{Code: CodeUnauthorized, Message: message}
+}
+
+func TooMany(message string) *Error {
+	return &Error{Code: CodeTooMany, Message: message}
 }
 
 func Internal(err error) *Error {

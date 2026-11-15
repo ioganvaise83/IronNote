@@ -13,17 +13,22 @@ import (
 
 const addTemplateExercise = `-- name: AddTemplateExercise :exec
 INSERT INTO workout_template_exercises
-    (template_id, exercise_id, sort_order, planned_sets, planned_reps, planned_weight_kg)
-VALUES ($1, $2, $3, $4, $5, $6)
+    (template_id, exercise_id, sort_order, planned_sets, planned_reps, planned_weight_kg, planned_duration_seconds)
+SELECT $1, $2, $3, $4, $5, $6, $8
+WHERE EXISTS (
+    SELECT 1 FROM workout_templates WHERE id = $1 AND user_id = $7
+)
 `
 
 type AddTemplateExerciseParams struct {
-	TemplateID      int64
-	ExerciseID      int64
-	SortOrder       int32
-	PlannedSets     *int32
-	PlannedReps     *int32
-	PlannedWeightKg pgtype.Numeric
+	TemplateID             int64
+	ExerciseID             int64
+	SortOrder              int32
+	PlannedSets            *int32
+	PlannedReps            *int32
+	PlannedWeightKg        pgtype.Numeric
+	UserID                 int64
+	PlannedDurationSeconds *int32
 }
 
 func (q *Queries) AddTemplateExercise(ctx context.Context, arg AddTemplateExerciseParams) error {
@@ -34,24 +39,35 @@ func (q *Queries) AddTemplateExercise(ctx context.Context, arg AddTemplateExerci
 		arg.PlannedSets,
 		arg.PlannedReps,
 		arg.PlannedWeightKg,
+		arg.UserID,
+		arg.PlannedDurationSeconds,
 	)
 	return err
 }
 
 const createTemplate = `-- name: CreateTemplate :one
-INSERT INTO workout_templates (name, description)
-VALUES ($1, $2)
+INSERT INTO workout_templates (user_id, name, description)
+VALUES ($1, $2, $3)
 RETURNING id, name, description, created_at, updated_at
 `
 
 type CreateTemplateParams struct {
+	UserID      int64
 	Name        string
 	Description string
 }
 
-func (q *Queries) CreateTemplate(ctx context.Context, arg CreateTemplateParams) (WorkoutTemplate, error) {
-	row := q.db.QueryRow(ctx, createTemplate, arg.Name, arg.Description)
-	var i WorkoutTemplate
+type CreateTemplateRow struct {
+	ID          int64
+	Name        string
+	Description string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+func (q *Queries) CreateTemplate(ctx context.Context, arg CreateTemplateParams) (CreateTemplateRow, error) {
+	row := q.db.QueryRow(ctx, createTemplate, arg.UserID, arg.Name, arg.Description)
+	var i CreateTemplateRow
 	err := row.Scan(
 		&i.ID,
 		&i.Name,
@@ -63,11 +79,16 @@ func (q *Queries) CreateTemplate(ctx context.Context, arg CreateTemplateParams) 
 }
 
 const deleteTemplate = `-- name: DeleteTemplate :execrows
-DELETE FROM workout_templates WHERE id = $1
+DELETE FROM workout_templates WHERE id = $1 AND user_id = $2
 `
 
-func (q *Queries) DeleteTemplate(ctx context.Context, id int64) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteTemplate, id)
+type DeleteTemplateParams struct {
+	ID     int64
+	UserID int64
+}
+
+func (q *Queries) DeleteTemplate(ctx context.Context, arg DeleteTemplateParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteTemplate, arg.ID, arg.UserID)
 	if err != nil {
 		return 0, err
 	}
@@ -75,23 +96,43 @@ func (q *Queries) DeleteTemplate(ctx context.Context, id int64) (int64, error) {
 }
 
 const deleteTemplateExercises = `-- name: DeleteTemplateExercises :exec
-DELETE FROM workout_template_exercises WHERE template_id = $1
+DELETE FROM workout_template_exercises te
+USING workout_templates t
+WHERE te.template_id = $1 AND t.id = te.template_id AND t.user_id = $2
 `
 
-func (q *Queries) DeleteTemplateExercises(ctx context.Context, templateID int64) error {
-	_, err := q.db.Exec(ctx, deleteTemplateExercises, templateID)
+type DeleteTemplateExercisesParams struct {
+	TemplateID int64
+	UserID     int64
+}
+
+func (q *Queries) DeleteTemplateExercises(ctx context.Context, arg DeleteTemplateExercisesParams) error {
+	_, err := q.db.Exec(ctx, deleteTemplateExercises, arg.TemplateID, arg.UserID)
 	return err
 }
 
 const getTemplate = `-- name: GetTemplate :one
 SELECT id, name, description, created_at, updated_at
 FROM workout_templates
-WHERE id = $1
+WHERE id = $1 AND user_id = $2
 `
 
-func (q *Queries) GetTemplate(ctx context.Context, id int64) (WorkoutTemplate, error) {
-	row := q.db.QueryRow(ctx, getTemplate, id)
-	var i WorkoutTemplate
+type GetTemplateParams struct {
+	ID     int64
+	UserID int64
+}
+
+type GetTemplateRow struct {
+	ID          int64
+	Name        string
+	Description string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+func (q *Queries) GetTemplate(ctx context.Context, arg GetTemplateParams) (GetTemplateRow, error) {
+	row := q.db.QueryRow(ctx, getTemplate, arg.ID, arg.UserID)
+	var i GetTemplateRow
 	err := row.Scan(
 		&i.ID,
 		&i.Name,
@@ -111,28 +152,38 @@ SELECT
     te.planned_sets,
     te.planned_reps,
     te.planned_weight_kg,
+    te.planned_duration_seconds,
     e.name AS exercise_name,
+    e.kind::text AS exercise_kind,
     e.is_archived AS exercise_archived
 FROM workout_template_exercises te
 JOIN exercises e ON e.id = te.exercise_id
-WHERE te.template_id = $1
+JOIN workout_templates t ON t.id = te.template_id
+WHERE te.template_id = $1 AND t.user_id = $2
 ORDER BY te.sort_order
 `
 
-type ListTemplateExercisesRow struct {
-	ID               int64
-	TemplateID       int64
-	ExerciseID       int64
-	SortOrder        int32
-	PlannedSets      *int32
-	PlannedReps      *int32
-	PlannedWeightKg  pgtype.Numeric
-	ExerciseName     string
-	ExerciseArchived bool
+type ListTemplateExercisesParams struct {
+	TemplateID int64
+	UserID     int64
 }
 
-func (q *Queries) ListTemplateExercises(ctx context.Context, templateID int64) ([]ListTemplateExercisesRow, error) {
-	rows, err := q.db.Query(ctx, listTemplateExercises, templateID)
+type ListTemplateExercisesRow struct {
+	ID                     int64
+	TemplateID             int64
+	ExerciseID             int64
+	SortOrder              int32
+	PlannedSets            *int32
+	PlannedReps            *int32
+	PlannedWeightKg        pgtype.Numeric
+	PlannedDurationSeconds *int32
+	ExerciseName           string
+	ExerciseKind           string
+	ExerciseArchived       bool
+}
+
+func (q *Queries) ListTemplateExercises(ctx context.Context, arg ListTemplateExercisesParams) ([]ListTemplateExercisesRow, error) {
+	rows, err := q.db.Query(ctx, listTemplateExercises, arg.TemplateID, arg.UserID)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +199,9 @@ func (q *Queries) ListTemplateExercises(ctx context.Context, templateID int64) (
 			&i.PlannedSets,
 			&i.PlannedReps,
 			&i.PlannedWeightKg,
+			&i.PlannedDurationSeconds,
 			&i.ExerciseName,
+			&i.ExerciseKind,
 			&i.ExerciseArchived,
 		); err != nil {
 			return nil, err
@@ -172,6 +225,7 @@ SELECT
     COALESCE(SUM(te.planned_sets), 0)::bigint AS planned_sets
 FROM workout_templates t
 LEFT JOIN workout_template_exercises te ON te.template_id = t.id
+WHERE t.user_id = $1
 GROUP BY t.id
 ORDER BY t.name
 `
@@ -186,8 +240,9 @@ type ListTemplatesRow struct {
 	PlannedSets   int64
 }
 
-func (q *Queries) ListTemplates(ctx context.Context) ([]ListTemplatesRow, error) {
-	rows, err := q.db.Query(ctx, listTemplates)
+// Templates are personal: one person's plan is not another's business.
+func (q *Queries) ListTemplates(ctx context.Context, userID int64) ([]ListTemplatesRow, error) {
+	rows, err := q.db.Query(ctx, listTemplates, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +272,7 @@ func (q *Queries) ListTemplates(ctx context.Context) ([]ListTemplatesRow, error)
 const updateTemplate = `-- name: UpdateTemplate :one
 UPDATE workout_templates
 SET name = $2, description = $3
-WHERE id = $1
+WHERE id = $1 AND user_id = $4
 RETURNING id, name, description, created_at, updated_at
 `
 
@@ -225,11 +280,25 @@ type UpdateTemplateParams struct {
 	ID          int64
 	Name        string
 	Description string
+	UserID      int64
 }
 
-func (q *Queries) UpdateTemplate(ctx context.Context, arg UpdateTemplateParams) (WorkoutTemplate, error) {
-	row := q.db.QueryRow(ctx, updateTemplate, arg.ID, arg.Name, arg.Description)
-	var i WorkoutTemplate
+type UpdateTemplateRow struct {
+	ID          int64
+	Name        string
+	Description string
+	CreatedAt   pgtype.Timestamptz
+	UpdatedAt   pgtype.Timestamptz
+}
+
+func (q *Queries) UpdateTemplate(ctx context.Context, arg UpdateTemplateParams) (UpdateTemplateRow, error) {
+	row := q.db.QueryRow(ctx, updateTemplate,
+		arg.ID,
+		arg.Name,
+		arg.Description,
+		arg.UserID,
+	)
+	var i UpdateTemplateRow
 	err := row.Scan(
 		&i.ID,
 		&i.Name,

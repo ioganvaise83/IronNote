@@ -6,6 +6,7 @@ SELECT
     e.name,
     e.description,
     e.equipment,
+    e.kind::text AS kind,
     e.is_archived,
     e.created_at,
     e.updated_at,
@@ -39,6 +40,7 @@ SELECT
     e.name,
     e.description,
     e.equipment,
+    e.kind::text AS kind,
     e.is_archived,
     e.created_at,
     e.updated_at,
@@ -59,13 +61,13 @@ WHERE e.id = $1
 GROUP BY e.id;
 
 -- name: CreateExercise :one
-INSERT INTO exercises (name, description, equipment)
-VALUES ($1, $2, $3)
+INSERT INTO exercises (name, description, equipment, kind)
+VALUES ($1, $2, $3, sqlc.arg('kind')::exercise_kind)
 RETURNING id;
 
 -- name: UpdateExercise :one
 UPDATE exercises
-SET name = $2, description = $3, equipment = $4
+SET name = $2, description = $3, equipment = $4, kind = sqlc.arg('kind')::exercise_kind
 WHERE id = $1
 RETURNING id;
 

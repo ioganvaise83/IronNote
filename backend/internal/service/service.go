@@ -32,6 +32,10 @@ func New(pool *pgxpool.Pool, logger *slog.Logger, loc *time.Location) *Service {
 // Timezone is the IANA zone used for month bucketing in statistics.
 func (s *Service) Timezone() *time.Location { return s.loc }
 
+// ErrNothingToSave is returned when a workout contains no completed set, so it is
+// discarded instead of being recorded as an empty entry.
+var ErrNothingToSave = errors.New("в тренировке нет ни одного выполненного подхода")
+
 // withTx runs fn inside a transaction and translates errors afterwards.
 func (s *Service) withTx(ctx context.Context, fn func(*store.Queries) error) error {
 	tx, err := s.pool.Begin(ctx)

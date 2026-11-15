@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  formatDistance,
   formatDuration,
+  formatSetDuration,
+  pace,
   formatElapsed,
   formatVolume,
   formatWeight,
@@ -74,5 +77,26 @@ describe('monthLabel', () => {
 describe('toDateInput', () => {
   it('produces a local YYYY-MM-DD value for a date input', () => {
     expect(toDateInput(new Date(2026, 2, 7, 15, 30).toISOString())).toBe('2026-03-07')
+  })
+})
+
+describe('cardio formatting', () => {
+  it('renders set duration in minutes and hours', () => {
+    expect(formatSetDuration(1800)).toBe('30 мин')
+    expect(formatSetDuration(4500)).toBe('1 ч 15 мин')
+    expect(formatSetDuration(7200)).toBe('2 ч')
+    expect(formatSetDuration(null)).toBe('—')
+  })
+
+  it('renders distance in km above a kilometre', () => {
+    expect(formatDistance(5000)).toBe('5 км')
+    expect(formatDistance(750)).toBe('750 м')
+    expect(formatDistance(null)).toBe('—')
+  })
+
+  it('computes pace per kilometre', () => {
+    expect(pace(1800, 5000)).toBe('6:00 /км')
+    expect(pace(900, 3000)).toBe('5:00 /км')
+    expect(pace(1800, null)).toBe('—')
   })
 })

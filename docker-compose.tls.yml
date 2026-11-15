@@ -1,0 +1,21 @@
+# Optional TLS overlay for a host with a public IP.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --build
+#
+# Expects certificates in ./deploy/certs (fullchain.pem, privkey.pem) — obtain them
+# with Certbot or your reverse proxy's tooling; this file only serves them.
+#
+# After enabling this, set in .env:
+#   IRONNOTE_COOKIE_SECURE=true
+#   IRONNOTE_PUBLIC_ORIGIN=https://your.domain
+#   APP_BIND_ADDRESS=0.0.0.0
+#   APP_PORT=80          # redirected to https below
+
+services:
+  frontend:
+    ports:
+      - "${APP_BIND_ADDRESS:-0.0.0.0}:80:80"
+      - "${APP_BIND_ADDRESS:-0.0.0.0}:443:443"
+    volumes:
+      - ./deploy/nginx-tls.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/certs:/etc/nginx/certs:ro

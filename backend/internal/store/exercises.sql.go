@@ -44,8 +44,8 @@ func (q *Queries) CountExerciseHistory(ctx context.Context, exerciseID int64) (i
 }
 
 const createExercise = `-- name: CreateExercise :one
-INSERT INTO exercises (name, description, equipment)
-VALUES ($1, $2, $3)
+INSERT INTO exercises (name, description, equipment, kind)
+VALUES ($1, $2, $3, $4::exercise_kind)
 RETURNING id
 `
 
@@ -53,10 +53,16 @@ type CreateExerciseParams struct {
 	Name        string
 	Description string
 	Equipment   *string
+	Kind        ExerciseKind
 }
 
 func (q *Queries) CreateExercise(ctx context.Context, arg CreateExerciseParams) (int64, error) {
-	row := q.db.QueryRow(ctx, createExercise, arg.Name, arg.Description, arg.Equipment)
+	row := q.db.QueryRow(ctx, createExercise,
+		arg.Name,
+		arg.Description,
+		arg.Equipment,
+		arg.Kind,
+	)
 	var id int64
 	err := row.Scan(&id)
 	return id, err
@@ -80,6 +86,7 @@ SELECT
     e.name,
     e.description,
     e.equipment,
+    e.kind::text AS kind,
     e.is_archived,
     e.created_at,
     e.updated_at,
@@ -105,6 +112,7 @@ type GetExerciseRow struct {
 	Name         string
 	Description  string
 	Equipment    *string
+	Kind         string
 	IsArchived   bool
 	CreatedAt    pgtype.Timestamptz
 	UpdatedAt    pgtype.Timestamptz
@@ -119,6 +127,7 @@ func (q *Queries) GetExercise(ctx context.Context, id int64) (GetExerciseRow, er
 		&i.Name,
 		&i.Description,
 		&i.Equipment,
+		&i.Kind,
 		&i.IsArchived,
 		&i.CreatedAt,
 		&i.UpdatedAt,
@@ -133,6 +142,7 @@ SELECT
     e.name,
     e.description,
     e.equipment,
+    e.kind::text AS kind,
     e.is_archived,
     e.created_at,
     e.updated_at,
@@ -172,6 +182,7 @@ type ListExercisesRow struct {
 	Name         string
 	Description  string
 	Equipment    *string
+	Kind         string
 	IsArchived   bool
 	CreatedAt    pgtype.Timestamptz
 	UpdatedAt    pgtype.Timestamptz
@@ -194,6 +205,7 @@ func (q *Queries) ListExercises(ctx context.Context, arg ListExercisesParams) ([
 			&i.Name,
 			&i.Description,
 			&i.Equipment,
+			&i.Kind,
 			&i.IsArchived,
 			&i.CreatedAt,
 			&i.UpdatedAt,
@@ -244,7 +256,7 @@ func (q *Queries) SetExerciseArchived(ctx context.Context, arg SetExerciseArchiv
 
 const updateExercise = `-- name: UpdateExercise :one
 UPDATE exercises
-SET name = $2, description = $3, equipment = $4
+SET name = $2, description = $3, equipment = $4, kind = $5::exercise_kind
 WHERE id = $1
 RETURNING id
 `
@@ -254,6 +266,7 @@ type UpdateExerciseParams struct {
 	Name        string
 	Description string
 	Equipment   *string
+	Kind        ExerciseKind
 }
 
 func (q *Queries) UpdateExercise(ctx context.Context, arg UpdateExerciseParams) (int64, error) {
@@ -262,6 +275,7 @@ func (q *Queries) UpdateExercise(ctx context.Context, arg UpdateExerciseParams) 
 		arg.Name,
 		arg.Description,
 		arg.Equipment,
+		arg.Kind,
 	)
 	var id int64
 	err := row.Scan(&id)

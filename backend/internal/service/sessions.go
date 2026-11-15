@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/ioganvaise83/ironnote/internal/apperror"
+	"github.com/ioganvaise83/ironnote/internal/auth"
 	"github.com/ioganvaise83/ironnote/internal/store"
 )
 
@@ -21,8 +22,8 @@ type StartSessionInput struct {
 // StartSession enforces one workout in flight. Starting from a template copies
 // its exercises and planned volume into the session: the template is a starting
 // gun, not a live link.
-func (s *Service) StartSession(ctx context.Context, in StartSessionInput) (Session, error) {
-	if _, err := s.q.GetActiveSession(ctx); err == nil {
+func (s *Service) StartSession(ctx context.Context, actor auth.Actor, in StartSessionInput) (Session, error) {
+	if _, err := s.q.GetActiveSession(ctx, actor.UserID); err == nil {
 		return Session{}, apperror.Conflict("Уже есть незавершённая тренировка — продолжите или завершите её")
 	} else if !isNoRows(err) {
 		return Session{}, apperror.Internal(err)
@@ -31,7 +32,7 @@ func (s *Service) StartSession(ctx context.Context, in StartSessionInput) (Sessi
 	var name string
 	var exercises []TemplateExercise
 	if in.TemplateID != nil {
-		tpl, err := s.GetTemplate(ctx, *in.TemplateID)
+		tpl, err := s.GetTemplate(ctx, actor, *in.TemplateID)
 		if err != nil {
 			return Session{}, err
 		}
@@ -50,6 +51,7 @@ func (s *Service) StartSession(ctx context.Context, in StartSessionInput) (Sessi
 	var id int64
 	err := s.withTx(ctx, func(q *store.Queries) error {
 		created, err := q.CreateSession(ctx, store.CreateSessionParams{
+			UserID:     actor.UserID,
 			TemplateID: in.TemplateID,
 			Name:       name,
 			StartedAt:  pgTimestamptz(time.Now()),
@@ -65,9 +67,25 @@ func (s *Service) StartSession(ctx context.Context, in StartSessionInput) (Sessi
 				WorkoutSessionID: id,
 				ExerciseID:       ex.ExerciseID,
 				SortOrder:        int32(i + 1),
+				UserID:           actor.UserID,
 			})
 			if err != nil {
 				return translate(err, "Упражнение")
+			}
+			// A timed movement has no planned sets/reps: it is one planned effort
+			// with a duration, recorded as a single set when the user starts.
+			if ex.PlannedDurationSeconds != nil {
+				if _, err := q.AddSet(ctx, store.AddSetParams{
+					WorkoutExerciseID: added.ID,
+					UserID:            actor.UserID,
+					SetNumber:         1,
+					Kind:              store.ExerciseKind(KindDuration),
+					DurationSeconds:   ex.PlannedDurationSeconds,
+					IsCompleted:       false,
+				}); err != nil {
+					return translate(err, "Подход")
+				}
+				continue
 			}
 			if ex.PlannedSets == nil {
 				continue
@@ -77,11 +95,21 @@ func (s *Service) StartSession(ctx context.Context, in StartSessionInput) (Sessi
 				count = 20 // a template typo should not create 50 empty rows
 			}
 			for n := int32(1); n <= count; n++ {
+				plannedReps := int16(derefInt32(ex.PlannedReps, 10))
+				plannedKind := KindWeighted
+				var plannedWeight *float64
+				if ex.PlannedWeightKg.IsSet() {
+					plannedWeight = ex.PlannedWeightKg.Ptr()
+				} else {
+					plannedKind = KindBodyweight
+				}
 				if _, err := q.AddSet(ctx, store.AddSetParams{
 					WorkoutExerciseID: added.ID,
+					UserID:            actor.UserID,
 					SetNumber:         n,
-					WeightKg:          store.PtrToNumeric(ex.PlannedWeightKg.Ptr()),
-					Repetitions:       int16(derefInt32(ex.PlannedReps, 10)),
+					Kind:              store.ExerciseKind(plannedKind),
+					WeightKg:          store.PtrToNumeric(plannedWeight),
+					Repetitions:       &plannedReps,
 					IsWarmup:          false,
 					// Planned rows start uncompleted: they are a target, not a fact.
 					IsCompleted: false,
@@ -95,18 +123,18 @@ func (s *Service) StartSession(ctx context.Context, in StartSessionInput) (Sessi
 	if err != nil {
 		return Session{}, err
 	}
-	return s.GetSession(ctx, id)
+	return s.GetSession(ctx, actor, id)
 }
 
-func (s *Service) GetActiveSession(ctx context.Context) (*Session, error) {
-	row, err := s.q.GetActiveSession(ctx)
+func (s *Service) GetActiveSession(ctx context.Context, actor auth.Actor) (*Session, error) {
+	row, err := s.q.GetActiveSession(ctx, actor.UserID)
 	if err != nil {
 		if isNoRows(err) {
 			return nil, nil
 		}
 		return nil, apperror.Internal(err)
 	}
-	session, err := s.loadSession(ctx, row.ID, false)
+	session, err := s.loadSession(ctx, actor, row.ID, false)
 	if err != nil {
 		return nil, err
 	}
@@ -123,8 +151,9 @@ type SessionFilter struct {
 // ListSessions returns full sessions with derived summary counters. The service
 // computes every number, so the history list and the statistics page cannot
 // disagree about volume.
-func (s *Service) ListSessions(ctx context.Context, f SessionFilter) ([]SessionSummary, error) {
+func (s *Service) ListSessions(ctx context.Context, actor auth.Actor, f SessionFilter) ([]SessionSummary, error) {
 	rows, err := s.q.ListSessionDetails(ctx, store.ListSessionDetailsParams{
+		UserID:      actor.UserID,
 		Status:      optionalString(f.Status),
 		StartedFrom: pgTimestamptzPtr(f.From),
 		StartedTo:   pgTimestamptzPtr(f.To),
@@ -141,12 +170,14 @@ func (s *Service) ListSessions(ctx context.Context, f SessionFilter) ([]SessionS
 	return out, nil
 }
 
-func (s *Service) GetSession(ctx context.Context, id int64) (Session, error) {
-	return s.loadSession(ctx, id, true)
+func (s *Service) GetSession(ctx context.Context, actor auth.Actor, id int64) (Session, error) {
+	return s.loadSession(ctx, actor, id, true)
 }
 
-func (s *Service) loadSession(ctx context.Context, id int64, withPrevious bool) (Session, error) {
-	rows, err := s.q.ListSessionDetails(ctx, store.ListSessionDetailsParams{SessionID: &id})
+func (s *Service) loadSession(ctx context.Context, actor auth.Actor, id int64, withPrevious bool) (Session, error) {
+	rows, err := s.q.ListSessionDetails(ctx, store.ListSessionDetailsParams{
+		UserID: actor.UserID, SessionID: &id,
+	})
 	if err != nil {
 		return Session{}, apperror.Internal(err)
 	}
@@ -158,7 +189,7 @@ func (s *Service) loadSession(ctx context.Context, id int64, withPrevious bool) 
 
 	if withPrevious {
 		for i := range session.Exercises {
-			prev, prevAt, err := s.previousSets(ctx, session.Exercises[i].ExerciseID, session.ID)
+			prev, prevAt, err := s.previousSets(ctx, actor, session.Exercises[i].ExerciseID, session.ID)
 			if err != nil {
 				return Session{}, err
 			}
@@ -169,9 +200,10 @@ func (s *Service) loadSession(ctx context.Context, id int64, withPrevious bool) 
 	return session, nil
 }
 
-func (s *Service) previousSets(ctx context.Context, exerciseID, excludeSessionID int64) ([]Set, *time.Time, error) {
+func (s *Service) previousSets(ctx context.Context, actor auth.Actor, exerciseID, excludeSessionID int64) ([]Set, *time.Time, error) {
 	rows, err := s.q.PreviousExerciseSets(ctx, store.PreviousExerciseSetsParams{
 		ExerciseID:       exerciseID,
+		UserID:           actor.UserID,
 		ExcludeSessionID: excludeSessionID,
 	})
 	if err != nil {
@@ -195,17 +227,25 @@ func (s *Service) previousSets(ctx context.Context, exerciseID, excludeSessionID
 	return out, &at, nil
 }
 
-// UpdateSessionInput edits the header of a session, optionally re-finishing it.
+// UpdateSessionInput edits the header of a session.
+//
+// StartedAt and DurationMinutes let a finished workout be corrected after the
+// fact: people forget to press "finish" and remember the real duration later. The
+// duration is applied as finished_at = started_at + duration, keeping the single
+// source of truth (two timestamps) rather than adding a third field.
 type UpdateSessionInput struct {
 	Name      *string    `json:"name"`
 	Notes     *string    `json:"notes"`
 	StartedAt *time.Time `json:"startedAt"`
+	// DurationMinutes replaces the recorded length; 0 is rejected because a
+	// zero-length workout is not a workout.
+	DurationMinutes *float64 `json:"durationMinutes"`
 }
 
 // UpdateSession keeps finished sessions editable, as required: notes and the
 // time can be corrected after the fact.
-func (s *Service) UpdateSession(ctx context.Context, id int64, in UpdateSessionInput) (Session, error) {
-	current, err := s.q.GetSession(ctx, id)
+func (s *Service) UpdateSession(ctx context.Context, actor auth.Actor, id int64, in UpdateSessionInput) (Session, error) {
+	current, err := s.q.GetSession(ctx, store.GetSessionParams{ID: id, UserID: actor.UserID})
 	if err != nil {
 		return Session{}, translate(err, "Тренировка")
 	}
@@ -224,53 +264,132 @@ func (s *Service) UpdateSession(ctx context.Context, id int64, in UpdateSessionI
 	if in.StartedAt != nil {
 		startedAt = *in.StartedAt
 	}
-	if current.FinishedAt.Valid && startedAt.After(current.FinishedAt.Time) {
+	if startedAt.After(time.Now().Add(time.Minute)) {
+		return Session{}, apperror.Validation("Начало тренировки не может быть в будущем",
+			map[string]string{"startedAt": "Укажите прошедшее время"})
+	}
+
+	finishedAt := current.FinishedAt
+	if in.DurationMinutes != nil {
+		if *in.DurationMinutes <= 0 {
+			return Session{}, apperror.Validation("Продолжительность должна быть больше нуля",
+				map[string]string{"durationMinutes": "Укажите продолжительность"})
+		}
+		if *in.DurationMinutes > 24*60 {
+			return Session{}, apperror.Validation("Продолжительность больше 24 часов",
+				map[string]string{"durationMinutes": "Слишком долго"})
+		}
+		end := startedAt.Add(time.Duration(*in.DurationMinutes * float64(time.Minute)))
+		if end.After(time.Now().Add(time.Minute)) {
+			return Session{}, apperror.Validation("Окончание тренировки не может быть в будущем",
+				map[string]string{"durationMinutes": "Укажите меньшую продолжительность"})
+		}
+		finishedAt = pgtype.Timestamptz{Time: end, Valid: true}
+	}
+
+	if finishedAt.Valid && startedAt.After(finishedAt.Time) {
 		return Session{}, apperror.Rule("Начало не может быть позже завершения")
 	}
+
 	if _, err := s.q.UpdateSession(ctx, store.UpdateSessionParams{
 		ID: id, Name: name, Notes: notes, StartedAt: pgTimestamptz(startedAt),
+		UserID: actor.UserID,
 	}); err != nil {
 		return Session{}, translate(err, "Тренировка")
 	}
-	return s.GetSession(ctx, id)
+
+	// Re-stamp the end time when the length was edited, through the same statement
+	// that finishing uses, so the invariant "completed implies finished_at" holds.
+	if finishedAt.Valid && (!current.FinishedAt.Valid || !current.FinishedAt.Time.Equal(finishedAt.Time)) {
+		if _, err := s.q.FinishSession(ctx, store.FinishSessionParams{
+			ID: id, FinishedAt: finishedAt, UserID: actor.UserID,
+		}); err != nil {
+			return Session{}, translate(err, "Тренировка")
+		}
+	}
+	return s.GetSession(ctx, actor, id)
 }
 
-// FinishSession stamps the end time. A workout with no completed set is still
-// finishable — the user may have logged nothing worth keeping — but the UI warns.
-func (s *Service) FinishSession(ctx context.Context, id int64) (Session, error) {
-	current, err := s.q.GetSession(ctx, id)
+// FinishSession stamps the end time.
+//
+// A workout worth recording must contain at least one exercise with at least one
+// completed, non-warmup set. Otherwise there is nothing to remember, so the
+// session is discarded rather than stored as an empty row that would pollute
+// history and statistics. The caller is told explicitly (ErrNothingToSave).
+func (s *Service) FinishSession(ctx context.Context, actor auth.Actor, id int64) (Session, error) {
+	current, err := s.q.GetSession(ctx, store.GetSessionParams{ID: id, UserID: actor.UserID})
 	if err != nil {
 		return Session{}, translate(err, "Тренировка")
 	}
 	if current.Status == StatusCompleted {
-		return s.GetSession(ctx, id)
+		return s.GetSession(ctx, actor, id)
 	}
+
+	loaded, err := s.loadSession(ctx, actor, id, false)
+	if err != nil {
+		return Session{}, err
+	}
+	if !hasRecordableWork(loaded) {
+		// Nothing was actually performed: do not keep an empty session.
+		if _, err := s.q.DeleteSession(ctx, store.DeleteSessionParams{ID: id, UserID: actor.UserID}); err != nil {
+			return Session{}, apperror.Internal(err)
+		}
+		return Session{}, ErrNothingToSave
+	}
+
 	now := time.Now()
 	if now.Before(current.StartedAt.Time) {
 		now = current.StartedAt.Time
 	}
-	if _, err := s.q.FinishSession(ctx, store.FinishSessionParams{ID: id, FinishedAt: pgTimestamptz(now)}); err != nil {
+	if _, err := s.q.FinishSession(ctx, store.FinishSessionParams{
+		ID: id, FinishedAt: pgTimestamptz(now), UserID: actor.UserID,
+	}); err != nil {
 		return Session{}, translate(err, "Тренировка")
 	}
-	return s.GetSession(ctx, id)
+	return s.GetSession(ctx, actor, id)
+}
+
+// hasRecordableWork reports whether a session contains anything worth keeping.
+//
+// An exercise counts when it has at least one completed set that is not a warmup,
+// and that set carries a real measure (reps for strength, time for cardio). A
+// session with exercises but no completed sets is as empty as one with none.
+func hasRecordableWork(session Session) bool {
+	for _, exercise := range session.Exercises {
+		for _, set := range exercise.Sets {
+			if !set.CountsAsWork() {
+				continue
+			}
+			if set.Kind == KindDuration {
+				if set.DurationSeconds != nil && *set.DurationSeconds > 0 {
+					return true
+				}
+				continue
+			}
+			if set.Repetitions != nil && *set.Repetitions > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ReopenSession moves a finished workout back to in_progress so it can be edited
 // in the active screen. It respects the single-active-session rule.
-func (s *Service) ReopenSession(ctx context.Context, id int64) (Session, error) {
-	if _, err := s.q.GetActiveSession(ctx); err == nil {
+func (s *Service) ReopenSession(ctx context.Context, actor auth.Actor, id int64) (Session, error) {
+	if _, err := s.q.GetActiveSession(ctx, actor.UserID); err == nil {
 		return Session{}, apperror.Conflict("Сначала завершите текущую незавершённую тренировку")
 	} else if !isNoRows(err) {
 		return Session{}, apperror.Internal(err)
 	}
-	if _, err := s.q.ReopenSession(ctx, id); err != nil {
+	if _, err := s.q.ReopenSession(ctx, store.ReopenSessionParams{ID: id, UserID: actor.UserID}); err != nil {
 		return Session{}, translate(err, "Тренировка")
 	}
-	return s.GetSession(ctx, id)
+	return s.GetSession(ctx, actor, id)
 }
 
-func (s *Service) DeleteSession(ctx context.Context, id int64) error {
-	affected, err := s.q.DeleteSession(ctx, id)
+func (s *Service) DeleteSession(ctx context.Context, actor auth.Actor, id int64) error {
+	affected, err := s.q.DeleteSession(ctx, store.DeleteSessionParams{ID: id, UserID: actor.UserID})
 	if err != nil {
 		return translate(err, "Тренировка")
 	}
@@ -281,8 +400,10 @@ func (s *Service) DeleteSession(ctx context.Context, id int64) error {
 }
 
 // AddSessionExercise appends a movement to a workout.
-func (s *Service) AddSessionExercise(ctx context.Context, sessionID, exerciseID int64, notes string) (SessionExercise, error) {
-	order, err := s.q.NextSessionExerciseSortOrder(ctx, sessionID)
+func (s *Service) AddSessionExercise(ctx context.Context, actor auth.Actor, sessionID, exerciseID int64, notes string) (SessionExercise, error) {
+	order, err := s.q.NextSessionExerciseSortOrder(ctx, store.NextSessionExerciseSortOrderParams{
+		WorkoutSessionID: sessionID, UserID: actor.UserID,
+	})
 	if err != nil {
 		return SessionExercise{}, apperror.Internal(err)
 	}
@@ -291,6 +412,7 @@ func (s *Service) AddSessionExercise(ctx context.Context, sessionID, exerciseID 
 		ExerciseID:       exerciseID,
 		SortOrder:        order,
 		Notes:            notes,
+		UserID:           actor.UserID,
 	})
 	if err != nil {
 		return SessionExercise{}, translate(err, "Упражнение")
@@ -301,19 +423,22 @@ func (s *Service) AddSessionExercise(ctx context.Context, sessionID, exerciseID 
 	}
 	return SessionExercise{
 		ID: added.ID, ExerciseID: exerciseID, ExerciseName: ex.Name,
-		Equipment: derefString(ex.Equipment), SortOrder: added.SortOrder, Notes: added.Notes,
+		Equipment: derefString(ex.Equipment), Kind: ParseKind(ex.Kind),
+		SortOrder: added.SortOrder, Notes: added.Notes,
 		Sets: []Set{},
 	}, nil
 }
 
 // MoveSessionExercise renumbers siblings inside a transaction so sort_order
 // stays unique at every step.
-func (s *Service) MoveSessionExercise(ctx context.Context, sessionID, sessionExerciseID int64, direction int) error {
+func (s *Service) MoveSessionExercise(ctx context.Context, actor auth.Actor, sessionID, sessionExerciseID int64, direction int) error {
 	if direction != -1 && direction != 1 {
 		return apperror.Validation("Направление должно быть -1 или 1", nil)
 	}
 	return s.withTx(ctx, func(q *store.Queries) error {
-		rows, err := q.ListSessionExercises(ctx, sessionID)
+		rows, err := q.ListSessionExercises(ctx, store.ListSessionExercisesParams{
+			WorkoutSessionID: sessionID, UserID: actor.UserID,
+		})
 		if err != nil {
 			return apperror.Internal(err)
 		}
@@ -334,7 +459,7 @@ func (s *Service) MoveSessionExercise(ctx context.Context, sessionID, sessionExe
 		// Two-phase renumber: move everything out of the way, then apply.
 		for i, r := range rows {
 			if err := q.SetSessionExerciseSortOrder(ctx, store.SetSessionExerciseSortOrderParams{
-				ID: r.ID, SortOrder: int32(i + 1 + len(rows)),
+				ID: r.ID, SortOrder: int32(i + 1 + len(rows)), UserID: actor.UserID,
 			}); err != nil {
 				return apperror.Internal(err)
 			}
@@ -342,7 +467,7 @@ func (s *Service) MoveSessionExercise(ctx context.Context, sessionID, sessionExe
 		rows[index], rows[target] = rows[target], rows[index]
 		for i, r := range rows {
 			if err := q.SetSessionExerciseSortOrder(ctx, store.SetSessionExerciseSortOrderParams{
-				ID: r.ID, SortOrder: int32(i + 1),
+				ID: r.ID, SortOrder: int32(i + 1), UserID: actor.UserID,
 			}); err != nil {
 				return apperror.Internal(err)
 			}
@@ -351,19 +476,19 @@ func (s *Service) MoveSessionExercise(ctx context.Context, sessionID, sessionExe
 	})
 }
 
-func (s *Service) UpdateSessionExerciseNotes(ctx context.Context, sessionID, sessionExerciseID int64, notes string) error {
+func (s *Service) UpdateSessionExerciseNotes(ctx context.Context, actor auth.Actor, sessionID, sessionExerciseID int64, notes string) error {
 	if _, err := s.q.UpdateSessionExercise(ctx, store.UpdateSessionExerciseParams{
 		ID: sessionExerciseID, WorkoutSessionID: sessionID, Notes: notes,
-		SortOrder: 0,
+		SortOrder: 0, UserID: actor.UserID,
 	}); err != nil {
 		return translate(err, "Упражнение в тренировке")
 	}
 	return nil
 }
 
-func (s *Service) DeleteSessionExercise(ctx context.Context, sessionID, sessionExerciseID int64) error {
+func (s *Service) DeleteSessionExercise(ctx context.Context, actor auth.Actor, sessionID, sessionExerciseID int64) error {
 	affected, err := s.q.DeleteSessionExercise(ctx, store.DeleteSessionExerciseParams{
-		ID: sessionExerciseID, WorkoutSessionID: sessionID,
+		ID: sessionExerciseID, WorkoutSessionID: sessionID, UserID: actor.UserID,
 	})
 	if err != nil {
 		return translate(err, "Упражнение в тренировке")
@@ -377,61 +502,142 @@ func (s *Service) DeleteSessionExercise(ctx context.Context, sessionID, sessionE
 // SetInput is a create/update payload for a set. Nil fields mean "not provided"
 // on update, so a PATCH from a single mobile field changes only that field.
 type SetInput struct {
-	WeightKg    *float64 `json:"weightKg"`
-	Repetitions *int32   `json:"repetitions"`
-	IsWarmup    *bool    `json:"isWarmup"`
-	IsCompleted *bool    `json:"isCompleted"`
-	// CopyPrevious repeats the previous set's weight and reps when creating.
+	WeightKg *float64 `json:"weightKg"`
+	// Repetitions and DurationSeconds are alternatives; which one is required
+	// depends on the exercise kind (see validateSetForKind).
+	Repetitions     *int32   `json:"repetitions"`
+	DurationSeconds *int32   `json:"durationSeconds"`
+	DistanceMeters  *float64 `json:"distanceMeters"`
+	IsWarmup        *bool    `json:"isWarmup"`
+	IsCompleted     *bool    `json:"isCompleted"`
+	// CopyPrevious repeats the previous set's values when creating.
 	CopyPrevious bool `json:"copyPrevious"`
 }
 
-func validateSet(in SetInput, creating bool) error {
+// validateSetForKind enforces which measures a set must carry.
+//
+// The database has equivalent CHECK constraints; validating here produces a clear
+// message naming the field instead of a 500 from a constraint violation.
+func validateSetForKind(in SetInput, kind ExerciseKind, creating bool) error {
 	details := map[string]string{}
+
 	if in.WeightKg != nil && (*in.WeightKg < 0 || *in.WeightKg > 2000) {
 		details["weightKg"] = "Вес: от 0 до 2000 кг"
 	}
 	if in.Repetitions != nil && (*in.Repetitions < 1 || *in.Repetitions > 1000) {
 		details["repetitions"] = "Повторения: от 1 до 1000"
 	}
-	if creating && in.Repetitions == nil {
-		details["repetitions"] = "Укажите количество повторений"
+	if in.DurationSeconds != nil && (*in.DurationSeconds < 1 || *in.DurationSeconds > 86400) {
+		details["durationSeconds"] = "Длительность: от 1 секунды до 24 часов"
 	}
+	if in.DistanceMeters != nil && (*in.DistanceMeters < 0 || *in.DistanceMeters > 1_000_000) {
+		details["distanceMeters"] = "Дистанция: от 0 до 1 000 000 м"
+	}
+
+	// A copied set inherits its measure from the previous one, so the requirement is
+	// satisfied by CopyPrevious even without an explicit value.
+	switch kind {
+	case KindDuration:
+		if creating && in.DurationSeconds == nil && !in.CopyPrevious {
+			details["durationSeconds"] = "Укажите длительность"
+		}
+		if in.Repetitions != nil {
+			details["repetitions"] = "Для упражнения на время повторения не указываются"
+		}
+	case KindWeighted, KindBodyweight:
+		if creating && in.Repetitions == nil && !in.CopyPrevious {
+			details["repetitions"] = "Укажите количество повторений"
+		}
+		if in.DurationSeconds != nil {
+			details["durationSeconds"] = "Для силового упражнения длительность не указывается"
+		}
+	}
+
 	if len(details) > 0 {
 		return apperror.Validation("Проверьте поля формы", details)
 	}
 	return nil
 }
 
-func (s *Service) AddSet(ctx context.Context, sessionID, sessionExerciseID int64, in SetInput) (Set, error) {
-	if err := validateSet(in, true); err != nil {
+// kindOfSessionExercise resolves the kind of an exercise row inside a session.
+func (s *Service) kindOfSessionExercise(ctx context.Context, actor auth.Actor, sessionID, sessionExerciseID int64) (ExerciseKind, error) {
+	var kind string
+	err := s.pool.QueryRow(ctx, `
+		SELECT e.kind::text
+		FROM workout_session_exercises se
+		JOIN workout_sessions s ON s.id = se.workout_session_id
+		JOIN exercises e ON e.id = se.exercise_id
+		WHERE se.id = $1 AND se.workout_session_id = $2 AND s.user_id = $3`,
+		sessionExerciseID, sessionID, actor.UserID).Scan(&kind)
+	if err != nil {
+		return "", translate(err, "Упражнение в тренировке")
+	}
+	return ParseKind(kind), nil
+}
+
+func (s *Service) AddSet(ctx context.Context, actor auth.Actor, sessionID, sessionExerciseID int64, in SetInput) (Set, error) {
+	kind, err := s.kindOfSessionExercise(ctx, actor, sessionID, sessionExerciseID)
+	if err != nil {
+		return Set{}, err
+	}
+	if err := validateSetForKind(in, kind, true); err != nil {
 		return Set{}, err
 	}
 	if _, err := s.q.GetSessionExercise(ctx, store.GetSessionExerciseParams{
-		ID: sessionExerciseID, WorkoutSessionID: sessionID,
+		ID: sessionExerciseID, WorkoutSessionID: sessionID, UserID: actor.UserID,
 	}); err != nil {
 		return Set{}, translate(err, "Упражнение в тренировке")
 	}
 
-	number, err := s.q.NextSetNumber(ctx, sessionExerciseID)
+	number, err := s.q.NextSetNumber(ctx, store.NextSetNumberParams{
+		WorkoutExerciseID: sessionExerciseID, UserID: actor.UserID,
+	})
 	if err != nil {
 		return Set{}, apperror.Internal(err)
 	}
 
 	var weight *float64
-	reps := int16(*in.Repetitions)
+	var reps *int16
+	var duration *int32
+	var distance *float64
 	warmup := false
 	completed := true
+
+	// Copying the previous set is the common case in the gym: same load, same reps.
+	// Copied values are defaults: anything the caller sends explicitly wins, so the
+	// inline editor can correct a single field of a copied set.
 	if in.CopyPrevious {
-		if last, err := s.q.LastSetForExercise(ctx, sessionExerciseID); err == nil {
+		if last, err := s.q.LastSetForExercise(ctx, store.LastSetForExerciseParams{
+			WorkoutExerciseID: sessionExerciseID, UserID: actor.UserID,
+		}); err == nil {
 			weight = store.NumericToPtr(last.WeightKg)
-			reps = last.Repetitions
+			if last.Repetitions != nil {
+				v := *last.Repetitions
+				reps = &v
+			}
+			if last.DurationSeconds != nil {
+				v := *last.DurationSeconds
+				duration = &v
+			}
+			distance = store.NumericToPtr(last.DistanceMeters)
 			warmup = last.IsWarmup
 		} else if !isNoRows(err) {
 			return Set{}, apperror.Internal(err)
 		}
 	}
+
 	if in.WeightKg != nil {
 		weight = in.WeightKg
+	}
+	if in.Repetitions != nil {
+		v := int16(*in.Repetitions)
+		reps = &v
+	}
+	if in.DurationSeconds != nil {
+		duration = in.DurationSeconds
+	}
+	if in.DistanceMeters != nil {
+		distance = in.DistanceMeters
 	}
 	if in.IsWarmup != nil {
 		warmup = *in.IsWarmup
@@ -440,30 +646,61 @@ func (s *Service) AddSet(ctx context.Context, sessionID, sessionExerciseID int64
 		completed = *in.IsCompleted
 	}
 
-	row, err := s.q.AddSet(ctx, store.AddSetParams{
+	// Normalise by kind so a bodyweight set never stores a stray weight and a
+	// timed set never stores reps, whatever the client sent.
+	switch kind {
+	case KindBodyweight:
+		weight = nil
+		duration = nil
+	case KindDuration:
+		weight = nil
+		reps = nil
+	}
+	if kind == KindDuration && duration == nil {
+		// A timed set with no duration cannot exist; default to a minute rather
+		// than failing the tap, and let the user correct it inline.
+		mins := int32(60)
+		duration = &mins
+	}
+	if kind != KindDuration && reps == nil {
+		// Nothing to copy from (first set of the exercise): a sensible default keeps
+		// the tap working; the user edits it before completing the set.
+		ten := int16(10)
+		reps = &ten
+	}
+
+	addRow, err := s.q.AddSet(ctx, store.AddSetParams{
 		WorkoutExerciseID: sessionExerciseID,
+		UserID:            actor.UserID,
 		SetNumber:         number,
+		Kind:              store.ExerciseKind(kind),
 		WeightKg:          store.PtrToNumeric(weight),
 		Repetitions:       reps,
+		DurationSeconds:   duration,
+		DistanceMeters:    store.PtrToNumeric(distance),
 		IsWarmup:          warmup,
 		IsCompleted:       completed,
 	})
 	if err != nil {
 		return Set{}, translate(err, "Подход")
 	}
-	return setFromRow(row), nil
+	return setFromAddRow(addRow), nil
 }
 
-func (s *Service) UpdateSet(ctx context.Context, sessionID, sessionExerciseID, setID int64, in SetInput) (Set, error) {
-	if err := validateSet(in, false); err != nil {
+func (s *Service) UpdateSet(ctx context.Context, actor auth.Actor, sessionID, sessionExerciseID, setID int64, in SetInput) (Set, error) {
+	kind, err := s.kindOfSessionExercise(ctx, actor, sessionID, sessionExerciseID)
+	if err != nil {
+		return Set{}, err
+	}
+	if err := validateSetForKind(in, kind, false); err != nil {
 		return Set{}, err
 	}
 	if _, err := s.q.GetSessionExercise(ctx, store.GetSessionExerciseParams{
-		ID: sessionExerciseID, WorkoutSessionID: sessionID,
+		ID: sessionExerciseID, WorkoutSessionID: sessionID, UserID: actor.UserID,
 	}); err != nil {
 		return Set{}, translate(err, "Упражнение в тренировке")
 	}
-	current, err := s.q.GetSet(ctx, setID)
+	current, err := s.q.GetSet(ctx, store.GetSetParams{ID: setID, UserID: actor.UserID})
 	if err != nil {
 		return Set{}, translate(err, "Подход")
 	}
@@ -472,12 +709,22 @@ func (s *Service) UpdateSet(ctx context.Context, sessionID, sessionExerciseID, s
 	}
 
 	weight := current.WeightKg
+	reps := current.Repetitions
+	duration := current.DurationSeconds
+	distance := current.DistanceMeters
+
 	if in.WeightKg != nil {
 		weight = store.PtrToNumeric(in.WeightKg)
 	}
-	reps := current.Repetitions
 	if in.Repetitions != nil {
-		reps = int16(*in.Repetitions)
+		v := int16(*in.Repetitions)
+		reps = &v
+	}
+	if in.DurationSeconds != nil {
+		duration = in.DurationSeconds
+	}
+	if in.DistanceMeters != nil {
+		distance = store.PtrToNumeric(in.DistanceMeters)
 	}
 	warmup := current.IsWarmup
 	if in.IsWarmup != nil {
@@ -488,31 +735,49 @@ func (s *Service) UpdateSet(ctx context.Context, sessionID, sessionExerciseID, s
 		completed = *in.IsCompleted
 	}
 
-	row, err := s.q.UpdateSet(ctx, store.UpdateSetParams{
-		ID: setID, WeightKg: weight, Repetitions: reps, IsWarmup: warmup, IsCompleted: completed,
+	// Keep the row consistent with its kind after the edit.
+	switch kind {
+	case KindBodyweight:
+		weight = store.PtrToNumeric(nil)
+		duration = nil
+	case KindDuration:
+		weight = store.PtrToNumeric(nil)
+		reps = nil
+	}
+
+	updRow, err := s.q.UpdateSet(ctx, store.UpdateSetParams{
+		ID:              setID,
+		WeightKg:        weight,
+		Repetitions:     reps,
+		DurationSeconds: duration,
+		DistanceMeters:  distance,
+		IsWarmup:        warmup,
+		IsCompleted:     completed,
+		UserID:          actor.UserID,
 	})
 	if err != nil {
 		return Set{}, translate(err, "Подход")
 	}
-	return setFromRow(row), nil
+	return setFromUpdateRow(updRow), nil
 }
 
-// DeleteSet removes a set and renumbers the rest so numbering stays 1..n.
-func (s *Service) DeleteSet(ctx context.Context, sessionID, sessionExerciseID, setID int64) error {
+func (s *Service) DeleteSet(ctx context.Context, actor auth.Actor, sessionID, sessionExerciseID, setID int64) error {
 	if _, err := s.q.GetSessionExercise(ctx, store.GetSessionExerciseParams{
-		ID: sessionExerciseID, WorkoutSessionID: sessionID,
+		ID: sessionExerciseID, WorkoutSessionID: sessionID, UserID: actor.UserID,
 	}); err != nil {
 		return translate(err, "Упражнение в тренировке")
 	}
 	return s.withTx(ctx, func(q *store.Queries) error {
-		affected, err := q.DeleteSet(ctx, setID)
+		affected, err := q.DeleteSet(ctx, store.DeleteSetParams{ID: setID, UserID: actor.UserID})
 		if err != nil {
 			return apperror.Internal(err)
 		}
 		if affected == 0 {
 			return apperror.NotFound("Подход")
 		}
-		rows, err := q.ListSessionSets(ctx, sessionExerciseID)
+		rows, err := q.ListSessionSets(ctx, store.ListSessionSetsParams{
+			WorkoutExerciseID: sessionExerciseID, UserID: actor.UserID,
+		})
 		if err != nil {
 			return apperror.Internal(err)
 		}
@@ -522,16 +787,22 @@ func (s *Service) DeleteSet(ctx context.Context, sessionID, sessionExerciseID, s
 				continue
 			}
 			// Offset first to avoid colliding with a number still in use.
-			if err := q.SetSetNumber(ctx, store.SetSetNumberParams{ID: r.ID, SetNumber: expected + 100}); err != nil {
+			if err := q.SetSetNumber(ctx, store.SetSetNumberParams{
+				ID: r.ID, SetNumber: expected + 100, UserID: actor.UserID,
+			}); err != nil {
 				return apperror.Internal(err)
 			}
 		}
-		rows, err = q.ListSessionSets(ctx, sessionExerciseID)
+		rows, err = q.ListSessionSets(ctx, store.ListSessionSetsParams{
+			WorkoutExerciseID: sessionExerciseID, UserID: actor.UserID,
+		})
 		if err != nil {
 			return apperror.Internal(err)
 		}
 		for i, r := range rows {
-			if err := q.SetSetNumber(ctx, store.SetSetNumberParams{ID: r.ID, SetNumber: int32(i + 1)}); err != nil {
+			if err := q.SetSetNumber(ctx, store.SetSetNumberParams{
+				ID: r.ID, SetNumber: int32(i + 1), UserID: actor.UserID,
+			}); err != nil {
 				return apperror.Internal(err)
 			}
 		}
@@ -541,12 +812,35 @@ func (s *Service) DeleteSet(ctx context.Context, sessionID, sessionExerciseID, s
 
 func setFromRow(r store.WorkoutSet) Set {
 	return Set{
-		ID:          r.ID,
-		SetNumber:   r.SetNumber,
-		WeightKg:    numericToWeight(r.WeightKg),
-		Repetitions: r.Repetitions,
-		IsWarmup:    r.IsWarmup,
-		IsCompleted: r.IsCompleted,
+		ID:              r.ID,
+		SetNumber:       r.SetNumber,
+		Kind:            ParseKind(string(r.Kind)),
+		WeightKg:        numericToWeight(r.WeightKg),
+		Repetitions:     r.Repetitions,
+		DurationSeconds: r.DurationSeconds,
+		DistanceMeters:  numericToWeight(r.DistanceMeters),
+		IsWarmup:        r.IsWarmup,
+		IsCompleted:     r.IsCompleted,
+	}
+}
+
+// setFromAddRow and setFromUpdateRow adapt the per-query row types sqlc generates
+// to the same domain value; without them every call site would repeat the mapping.
+func setFromAddRow(r store.AddSetRow) Set {
+	return Set{
+		ID: r.ID, SetNumber: r.SetNumber, Kind: ParseKind(r.Kind),
+		WeightKg: numericToWeight(r.WeightKg), Repetitions: r.Repetitions,
+		DurationSeconds: r.DurationSeconds, DistanceMeters: numericToWeight(r.DistanceMeters),
+		IsWarmup: r.IsWarmup, IsCompleted: r.IsCompleted,
+	}
+}
+
+func setFromUpdateRow(r store.UpdateSetRow) Set {
+	return Set{
+		ID: r.ID, SetNumber: r.SetNumber, Kind: ParseKind(r.Kind),
+		WeightKg: numericToWeight(r.WeightKg), Repetitions: r.Repetitions,
+		DurationSeconds: r.DurationSeconds, DistanceMeters: numericToWeight(r.DistanceMeters),
+		IsWarmup: r.IsWarmup, IsCompleted: r.IsCompleted,
 	}
 }
 
@@ -586,6 +880,7 @@ func groupSessionDetails(rows []store.ListSessionDetailsRow) []Session {
 				ExerciseID:       derefInt64(r.ExerciseID),
 				ExerciseName:     derefString(r.ExerciseName),
 				Equipment:        derefString(r.Equipment),
+				Kind:             ParseKind(r.ExerciseKind.(string)),
 				ExerciseArchived: r.ExerciseArchived != nil && *r.ExerciseArchived,
 				SortOrder:        derefInt32(r.SortOrder, 0),
 				Notes:            derefString(r.ExerciseNotes),
@@ -598,12 +893,15 @@ func groupSessionDetails(rows []store.ListSessionDetailsRow) []Session {
 			continue
 		}
 		sessions[si].Exercises[ei].Sets = append(sessions[si].Exercises[ei].Sets, Set{
-			ID:          *r.SetID,
-			SetNumber:   derefInt32(r.SetNumber, 0),
-			WeightKg:    numericToWeight(r.WeightKg),
-			Repetitions: derefInt16(r.Repetitions),
-			IsWarmup:    r.IsWarmup != nil && *r.IsWarmup,
-			IsCompleted: r.IsCompleted != nil && *r.IsCompleted,
+			ID:              *r.SetID,
+			SetNumber:       derefInt32(r.SetNumber, 0),
+			Kind:            ParseKind(r.Kind.(string)),
+			WeightKg:        numericToWeight(r.WeightKg),
+			Repetitions:     r.Repetitions,
+			DurationSeconds: r.DurationSeconds,
+			DistanceMeters:  numericToWeight(r.DistanceMeters),
+			IsWarmup:        r.IsWarmup,
+			IsCompleted:     r.IsCompleted,
 		})
 	}
 	return sessions
@@ -627,13 +925,6 @@ func pgTimestamptzPtr(t *time.Time) pgtype.Timestamptz {
 func derefInt32(p *int32, fallback int32) int32 {
 	if p == nil {
 		return fallback
-	}
-	return *p
-}
-
-func derefInt16(p *int16) int16 {
-	if p == nil {
-		return 0
 	}
 	return *p
 }

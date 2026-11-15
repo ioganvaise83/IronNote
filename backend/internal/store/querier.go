@@ -6,39 +6,68 @@ package store
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Querier interface {
 	AddExerciseMuscleGroup(ctx context.Context, arg AddExerciseMuscleGroupParams) error
+	// The SELECT guard makes the insert fail (no rows) when the session belongs to
+	// somebody else, so an unowned write is impossible even if a caller forgets.
 	AddSessionExercise(ctx context.Context, arg AddSessionExerciseParams) (WorkoutSessionExercise, error)
-	AddSet(ctx context.Context, arg AddSetParams) (WorkoutSet, error)
+	// The EXISTS guard rejects a write to an exercise row the actor does not own.
+	AddSet(ctx context.Context, arg AddSetParams) (AddSetRow, error)
 	AddTemplateExercise(ctx context.Context, arg AddTemplateExerciseParams) error
-	AvailableStatPeriod(ctx context.Context) (AvailableStatPeriodRow, error)
+	AvailableStatPeriod(ctx context.Context, userID int64) (AvailableStatPeriodRow, error)
+	ClearFailedLogins(ctx context.Context, id int64) error
+	CountActiveAdmins(ctx context.Context) (int64, error)
 	// Anything that would lose meaning if the exercise row disappeared.
 	CountExerciseHistory(ctx context.Context, exerciseID int64) (int32, error)
 	// An exercise or template referencing this group would break if it vanished.
 	CountMuscleGroupUsage(ctx context.Context, muscleGroupID int64) (int64, error)
+	// Sliding window used for the per-IP limit, so a spoofed or shared address can
+	// still only make a bounded number of guesses.
+	CountRecentLoginFailures(ctx context.Context, arg CountRecentLoginFailuresParams) (int64, error)
+	CountUsers(ctx context.Context) (int64, error)
+	CreateAuthSession(ctx context.Context, arg CreateAuthSessionParams) error
 	CreateExercise(ctx context.Context, arg CreateExerciseParams) (int64, error)
 	CreateMuscleGroup(ctx context.Context, arg CreateMuscleGroupParams) (MuscleGroup, error)
-	CreateSession(ctx context.Context, arg CreateSessionParams) (WorkoutSession, error)
-	CreateTemplate(ctx context.Context, arg CreateTemplateParams) (WorkoutTemplate, error)
+	CreateSession(ctx context.Context, arg CreateSessionParams) (CreateSessionRow, error)
+	CreateTemplate(ctx context.Context, arg CreateTemplateParams) (CreateTemplateRow, error)
+	CreateUser(ctx context.Context, arg CreateUserParams) (int64, error)
+	DeleteAuthSessionByHash(ctx context.Context, tokenHash []byte) error
 	DeleteExercise(ctx context.Context, id int64) (int64, error)
+	DeleteExpiredSessions(ctx context.Context) (int64, error)
 	DeleteMuscleGroup(ctx context.Context, id int64) (int64, error)
-	DeleteSession(ctx context.Context, id int64) (int64, error)
+	DeleteSession(ctx context.Context, arg DeleteSessionParams) (int64, error)
 	DeleteSessionExercise(ctx context.Context, arg DeleteSessionExerciseParams) (int64, error)
-	DeleteSet(ctx context.Context, id int64) (int64, error)
-	DeleteTemplate(ctx context.Context, id int64) (int64, error)
-	DeleteTemplateExercises(ctx context.Context, templateID int64) error
-	FindSessionExerciseByID(ctx context.Context, id int64) (WorkoutSessionExercise, error)
-	FinishSession(ctx context.Context, arg FinishSessionParams) (WorkoutSession, error)
-	GetActiveSession(ctx context.Context) (WorkoutSession, error)
+	DeleteSessionsForUser(ctx context.Context, userID int64) error
+	DeleteSet(ctx context.Context, arg DeleteSetParams) (int64, error)
+	DeleteTemplate(ctx context.Context, arg DeleteTemplateParams) (int64, error)
+	DeleteTemplateExercises(ctx context.Context, arg DeleteTemplateExercisesParams) error
+	// The caller must have already verified this is not the last active admin.
+	DeleteUser(ctx context.Context, id int64) (int64, error)
+	FindSessionExerciseByID(ctx context.Context, arg FindSessionExerciseByIDParams) (WorkoutSessionExercise, error)
+	FinishSession(ctx context.Context, arg FinishSessionParams) (FinishSessionRow, error)
+	// Scoped to the owner: "the workout in progress" is per person, never global.
+	GetActiveSession(ctx context.Context, userID int64) (GetActiveSessionRow, error)
+	// Joins the user so a disabled account is rejected on the very next request
+	// rather than at token expiry.
+	GetAuthSession(ctx context.Context, tokenHash []byte) (GetAuthSessionRow, error)
 	GetExercise(ctx context.Context, id int64) (GetExerciseRow, error)
 	GetMuscleGroup(ctx context.Context, id int64) (MuscleGroup, error)
-	GetSession(ctx context.Context, id int64) (WorkoutSession, error)
+	// Always owner-scoped. There is deliberately no unscoped "get session by id":
+	// forgetting the filter then becomes impossible rather than a data leak.
+	GetSession(ctx context.Context, arg GetSessionParams) (GetSessionRow, error)
+	// Ownership is checked through the parent session, so a guessed exercise id from
+	// another user's workout does not resolve.
 	GetSessionExercise(ctx context.Context, arg GetSessionExerciseParams) (WorkoutSessionExercise, error)
-	GetSet(ctx context.Context, id int64) (WorkoutSet, error)
-	GetTemplate(ctx context.Context, id int64) (WorkoutTemplate, error)
-	LastSetForExercise(ctx context.Context, workoutExerciseID int64) (WorkoutSet, error)
+	GetSet(ctx context.Context, arg GetSetParams) (GetSetRow, error)
+	GetTemplate(ctx context.Context, arg GetTemplateParams) (GetTemplateRow, error)
+	GetUserByID(ctx context.Context, id int64) (GetUserByIDRow, error)
+	// Login lookup is case-insensitive via the generated username_key column.
+	GetUserByUsername(ctx context.Context, username string) (GetUserByUsernameRow, error)
+	LastSetForExercise(ctx context.Context, arg LastSetForExerciseParams) (LastSetForExerciseRow, error)
 	// The catalogue is small enough that joining the muscle groups in one query keeps
 	// the UI from doing N+1 round trips.
 	ListExercises(ctx context.Context, arg ListExercisesParams) ([]ListExercisesRow, error)
@@ -51,28 +80,42 @@ type Querier interface {
 	// enough that fetching sets joined to sessions is cheaper than several aggregate
 	// queries that drift apart.
 	ListSessionDetails(ctx context.Context, arg ListSessionDetailsParams) ([]ListSessionDetailsRow, error)
-	ListSessionExercises(ctx context.Context, workoutSessionID int64) ([]ListSessionExercisesRow, error)
-	ListSessionSets(ctx context.Context, workoutExerciseID int64) ([]WorkoutSet, error)
-	ListSetsForSession(ctx context.Context, workoutSessionID int64) ([]WorkoutSet, error)
-	ListTemplateExercises(ctx context.Context, templateID int64) ([]ListTemplateExercisesRow, error)
-	ListTemplates(ctx context.Context) ([]ListTemplatesRow, error)
-	NextSessionExerciseSortOrder(ctx context.Context, workoutSessionID int64) (int32, error)
-	NextSetNumber(ctx context.Context, workoutExerciseID int64) (int32, error)
+	ListSessionExercises(ctx context.Context, arg ListSessionExercisesParams) ([]ListSessionExercisesRow, error)
+	ListSessionSets(ctx context.Context, arg ListSessionSetsParams) ([]ListSessionSetsRow, error)
+	ListSetsForSession(ctx context.Context, arg ListSetsForSessionParams) ([]ListSetsForSessionRow, error)
+	ListTemplateExercises(ctx context.Context, arg ListTemplateExercisesParams) ([]ListTemplateExercisesRow, error)
+	// Templates are personal: one person's plan is not another's business.
+	ListTemplates(ctx context.Context, userID int64) ([]ListTemplatesRow, error)
+	ListUsers(ctx context.Context) ([]ListUsersRow, error)
+	NextSessionExerciseSortOrder(ctx context.Context, arg NextSessionExerciseSortOrderParams) (int32, error)
+	NextSetNumber(ctx context.Context, arg NextSetNumberParams) (int32, error)
 	// "Last time" for one exercise: the most recent *other* completed session that
 	// contains it, so an in-progress workout can prefill the next attempt.
 	PreviousExerciseSets(ctx context.Context, arg PreviousExerciseSetsParams) ([]PreviousExerciseSetsRow, error)
-	ReopenSession(ctx context.Context, id int64) (WorkoutSession, error)
+	PruneLoginAttempts(ctx context.Context, olderThan pgtype.Interval) (int64, error)
+	RecordLoginAttempt(ctx context.Context, arg RecordLoginAttemptParams) error
+	// Counts the failure and locks the account once the threshold is crossed. Done in
+	// one statement so concurrent attempts cannot lose an increment.
+	RegisterFailedLogin(ctx context.Context, arg RegisterFailedLoginParams) (RegisterFailedLoginRow, error)
+	ReopenSession(ctx context.Context, arg ReopenSessionParams) (ReopenSessionRow, error)
 	ReplaceExerciseMuscleGroups(ctx context.Context, exerciseID int64) error
+	RevokeAuthSession(ctx context.Context, id int64) error
+	RotateSessionCSRF(ctx context.Context, arg RotateSessionCSRFParams) error
 	SetExerciseArchived(ctx context.Context, arg SetExerciseArchivedParams) (SetExerciseArchivedRow, error)
 	SetSessionExerciseSortOrder(ctx context.Context, arg SetSessionExerciseSortOrderParams) error
 	// Keeps numbering contiguous after a deletion.
 	SetSetNumber(ctx context.Context, arg SetSetNumberParams) error
+	// Also clears the forced-change flag and any lockout: an admin reset is the
+	// recovery path for a locked-out account.
+	SetUserPassword(ctx context.Context, arg SetUserPasswordParams) (int64, error)
+	TouchAuthSession(ctx context.Context, id int64) error
 	UpdateExercise(ctx context.Context, arg UpdateExerciseParams) (int64, error)
 	UpdateMuscleGroup(ctx context.Context, arg UpdateMuscleGroupParams) (MuscleGroup, error)
-	UpdateSession(ctx context.Context, arg UpdateSessionParams) (WorkoutSession, error)
+	UpdateSession(ctx context.Context, arg UpdateSessionParams) (UpdateSessionRow, error)
 	UpdateSessionExercise(ctx context.Context, arg UpdateSessionExerciseParams) (WorkoutSessionExercise, error)
-	UpdateSet(ctx context.Context, arg UpdateSetParams) (WorkoutSet, error)
-	UpdateTemplate(ctx context.Context, arg UpdateTemplateParams) (WorkoutTemplate, error)
+	UpdateSet(ctx context.Context, arg UpdateSetParams) (UpdateSetRow, error)
+	UpdateTemplate(ctx context.Context, arg UpdateTemplateParams) (UpdateTemplateRow, error)
+	UpdateUserProfile(ctx context.Context, arg UpdateUserProfileParams) (int64, error)
 }
 
 var _ Querier = (*Queries)(nil)

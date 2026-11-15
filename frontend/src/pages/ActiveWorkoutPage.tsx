@@ -28,6 +28,7 @@ export function ActiveWorkoutPage() {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [confirmFinish, setConfirmFinish] = useState(false)
   const [removeExercise, setRemoveExercise] = useState<SessionExercise | null>(null)
+  const [discarded, setDiscarded] = useState<string | null>(null)
 
   const sessionQuery = useQuery({
     queryKey: queryKeys.session(sessionId),
@@ -97,7 +98,16 @@ export function ActiveWorkoutPage() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.statsSummary({}) })
       navigate(`/history/${sessionId}`)
     },
-    onError: (error) => setActionError(describeError(error)),
+    onError: (error) => {
+      // The server discards a workout with nothing performed and says so; there is
+      // nothing to retry, so explain it and leave the screen.
+      if (error instanceof ApiError && error.status === 422) {
+        setConfirmFinish(false)
+        setDiscarded(error.message)
+        return
+      }
+      setActionError(describeError(error))
+    },
   })
 
   const updateSession = useMutation({
@@ -149,7 +159,7 @@ export function ActiveWorkoutPage() {
               disabled={updateSession.isPending}
               onCommit={(name) => name && updateSession.mutate({ name })}
             />
-            <p className="mt-0.5 flex items-center gap-2 text-xs text-ink-muted">
+            <p className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-ink-muted">
               <Elapsed startedAt={session.startedAt} />
               <span aria-hidden="true">·</span>
               <span>{totals.setCount} {plural(totals.setCount, 'подход', 'подхода', 'подходов')}</span>
@@ -244,6 +254,28 @@ export function ActiveWorkoutPage() {
         busy={addExercise.isPending}
       />
 
+      {discarded && (
+        <div
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-4 sm:items-center"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="discarded-title"
+        >
+          <div className="w-full max-w-sm rounded-card border border-line bg-surface p-5">
+            <h2 id="discarded-title" className="text-lg font-semibold">
+              Тренировка не сохранена
+            </h2>
+            <p className="mt-2 text-sm text-ink-muted">
+              В ней нет ни одного выполненного подхода, поэтому записывать нечего. Отметьте подходы
+              галочкой и завершите тренировку снова.
+            </p>
+            <Button variant="primary" block className="mt-4" onClick={() => navigate('/')}>
+              К тренировкам
+            </Button>
+          </div>
+        </div>
+      )}
+
       <ConfirmDialog
         open={confirmFinish}
         title="Завершить тренировку?"
@@ -308,7 +340,12 @@ function ExerciseCard({
   const last = exercise.sets[exercise.sets.length - 1]
 
   // "Add set" copies the last set (weight + reps) so the usual case is one tap.
-  const nextBody = (): SetInput => ({ repetitions: 10, copyPrevious: true })
+  // One tap adds a set pre-filled from the previous one. For cardio the default is
+  // a plausible duration rather than a rep count, which does not exist there.
+  const nextBody = (): SetInput =>
+    exercise.kind === 'duration'
+      ? { durationSeconds: 20 * 60, copyPrevious: true }
+      : { repetitions: 10, copyPrevious: true }
 
   return (
     <Card className="overflow-hidden">
@@ -399,9 +436,21 @@ function ExerciseCard({
 
       <div className="mx-1 flex items-center gap-1.5 px-2 pb-1 text-[10px] uppercase tracking-wide text-ink-faint">
         <span className="w-11 text-center">Подх.</span>
-        <span className="flex-1 text-center">Вес</span>
-        <span className="flex-1 text-center">Повторы</span>
-        <span className="hidden w-[5rem] text-center sm:block">Объём</span>
+        {exercise.kind === 'duration' ? (
+          <>
+            <span className="flex-1 text-center">Время</span>
+            <span className="flex-1 text-center">Дистанция</span>
+            <span className="hidden w-[5rem] text-center sm:block">Итого</span>
+          </>
+        ) : (
+          <>
+            <span className="flex-1 text-center">
+              {exercise.kind === 'bodyweight' ? 'Свой вес' : 'Вес'}
+            </span>
+            <span className="flex-1 text-center">Повторы</span>
+            <span className="hidden w-[5rem] text-center sm:block">Объём</span>
+          </>
+        )}
         <span className="w-[2.75rem]" />
         <span className="w-[2.75rem]" />
       </div>
@@ -411,11 +460,18 @@ function ExerciseCard({
           <WorkoutSetRow
             key={set.id}
             set={set}
+            kind={exercise.kind}
             readOnly={readOnly}
             saving={busy}
             onSave={(patch) => onSaveSet(set.id, patch)}
             onDelete={() => onDeleteSet(set.id)}
-            onCopy={() => onAddSet({ repetitions: set.repetitions, weightKg: set.weightKg })}
+            onCopy={() =>
+              onAddSet(
+                exercise.kind === 'duration'
+                  ? { durationSeconds: set.durationSeconds, distanceMeters: set.distanceMeters }
+                  : { repetitions: set.repetitions, weightKg: set.weightKg },
+              )
+            }
           />
         ))}
       </div>

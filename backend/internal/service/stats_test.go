@@ -6,6 +6,9 @@ import (
 	"time"
 )
 
+func reps16(v int16) *int16 { return &v }
+func secs(v int32) *int32   { return &v }
+
 func approx(t *testing.T, got, want float64) {
 	t.Helper()
 	if math.Abs(got-want) > 1e-9 {
@@ -20,11 +23,11 @@ func TestSetVolumeCountsOnlyCompletedWeightedWorkingSets(t *testing.T) {
 		want    float64
 		counted bool
 	}{
-		{"working set", Set{WeightKg: NewWeight(80), Repetitions: 10, IsCompleted: true}, 800, true},
-		{"warmup excluded", Set{WeightKg: NewWeight(60), Repetitions: 10, IsWarmup: true, IsCompleted: true}, 0, false},
-		{"incomplete excluded", Set{WeightKg: NewWeight(80), Repetitions: 10, IsCompleted: false}, 0, false},
-		{"bodyweight excluded from volume", Set{Repetitions: 10, IsCompleted: true}, 0, false},
-		{"fractional weight exact enough", Set{WeightKg: NewWeight(61.25), Repetitions: 8, IsCompleted: true}, 490, true},
+		{"working set", Set{WeightKg: NewWeight(80), Repetitions: reps16(10), IsCompleted: true}, 800, true},
+		{"warmup excluded", Set{WeightKg: NewWeight(60), Repetitions: reps16(10), IsWarmup: true, IsCompleted: true}, 0, false},
+		{"incomplete excluded", Set{WeightKg: NewWeight(80), Repetitions: reps16(10), IsCompleted: false}, 0, false},
+		{"bodyweight excluded from volume", Set{Repetitions: reps16(10), IsCompleted: true}, 0, false},
+		{"fractional weight exact enough", Set{WeightKg: NewWeight(61.25), Repetitions: reps16(8), IsCompleted: true}, 490, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -39,7 +42,7 @@ func TestSetVolumeCountsOnlyCompletedWeightedWorkingSets(t *testing.T) {
 
 func TestEpley1RM(t *testing.T) {
 	// 100 kg × 5 → 100 × (1 + 5/30) = 116.666…
-	got, ok := Set{WeightKg: NewWeight(100), Repetitions: 5, IsCompleted: true}.Epley1RM()
+	got, ok := Set{WeightKg: NewWeight(100), Repetitions: reps16(5), IsCompleted: true}.Epley1RM()
 	if !ok {
 		t.Fatal("expected an estimate")
 	}
@@ -48,14 +51,14 @@ func TestEpley1RM(t *testing.T) {
 	}
 
 	// A true single is also an estimate of exactly its own weight.
-	single, _ := Set{WeightKg: NewWeight(140), Repetitions: 1, IsCompleted: true}.Epley1RM()
+	single, _ := Set{WeightKg: NewWeight(140), Repetitions: reps16(1), IsCompleted: true}.Epley1RM()
 	approx(t, single, 140*1.0333333333333332)
 
 	// Warmups and unweighted sets never produce an estimate.
-	if _, ok := (Set{WeightKg: NewWeight(100), Repetitions: 5, IsWarmup: true, IsCompleted: true}).Epley1RM(); ok {
+	if _, ok := (Set{WeightKg: NewWeight(100), Repetitions: reps16(5), IsWarmup: true, IsCompleted: true}).Epley1RM(); ok {
 		t.Fatal("warmup must not produce a 1RM estimate")
 	}
-	if _, ok := (Set{Repetitions: 5, IsCompleted: true}).Epley1RM(); ok {
+	if _, ok := (Set{Repetitions: reps16(5), IsCompleted: true}).Epley1RM(); ok {
 		t.Fatal("bodyweight set must not produce a 1RM estimate")
 	}
 }
@@ -63,8 +66,8 @@ func TestEpley1RM(t *testing.T) {
 func TestActualSingleIsSeparatedFromEstimate(t *testing.T) {
 	// 120×1 is an actual single; 100×8 has a bigger estimate (126.7) but is not
 	// an actual max. The two must never be conflated.
-	actual := Set{WeightKg: NewWeight(120), Repetitions: 1, IsCompleted: true}
-	est := Set{WeightKg: NewWeight(100), Repetitions: 8, IsCompleted: true}
+	actual := Set{WeightKg: NewWeight(120), Repetitions: reps16(1), IsCompleted: true}
+	est := Set{WeightKg: NewWeight(100), Repetitions: reps16(8), IsCompleted: true}
 
 	if !actual.IsActualSingle() {
 		t.Fatal("120×1 should be an actual single")
@@ -85,14 +88,14 @@ func TestSummarize(t *testing.T) {
 		ID: 1, Name: "Грудь", StartedAt: start, FinishedAt: &finish, Status: StatusCompleted,
 		Exercises: []SessionExercise{
 			{ExerciseID: 1, Sets: []Set{
-				{WeightKg: NewWeight(60), Repetitions: 12, IsCompleted: true},                 // 720
-				{WeightKg: NewWeight(80), Repetitions: 10, IsCompleted: true},                 // 800
-				{WeightKg: NewWeight(90), Repetitions: 8, IsCompleted: true},                  // 720
-				{WeightKg: NewWeight(40), Repetitions: 15, IsWarmup: true, IsCompleted: true}, // excluded
+				{WeightKg: NewWeight(60), Repetitions: reps16(12), IsCompleted: true},                 // 720
+				{WeightKg: NewWeight(80), Repetitions: reps16(10), IsCompleted: true},                 // 800
+				{WeightKg: NewWeight(90), Repetitions: reps16(8), IsCompleted: true},                  // 720
+				{WeightKg: NewWeight(40), Repetitions: reps16(15), IsWarmup: true, IsCompleted: true}, // excluded
 			}},
 			{ExerciseID: 2, Sets: []Set{
-				{WeightKg: NewWeight(12), Repetitions: 12, IsCompleted: true},  // 144
-				{WeightKg: NewWeight(14), Repetitions: 10, IsCompleted: false}, // not done: excluded
+				{WeightKg: NewWeight(12), Repetitions: reps16(12), IsCompleted: true},  // 144
+				{WeightKg: NewWeight(14), Repetitions: reps16(10), IsCompleted: false}, // not done: excluded
 			}},
 			{ExerciseID: 3, Sets: nil}, // added but never trained: not counted as an exercise
 		},

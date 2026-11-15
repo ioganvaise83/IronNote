@@ -22,14 +22,22 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ioganvaise83/ironnote/internal/api"
+	"github.com/ioganvaise83/ironnote/internal/auth"
 	"github.com/ioganvaise83/ironnote/internal/database"
 	"github.com/ioganvaise83/ironnote/internal/service"
 )
 
 type testEnv struct {
-	t      *testing.T
-	server *httptest.Server
-	pool   *pgxpool.Pool
+	t             *testing.T
+	server        *httptest.Server
+	pool          *pgxpool.Pool
+	auth          *auth.Service
+	svc           *service.Service
+	adminUsername string
+	adminPassword string
+	// admin is a signed-in administrator; do() uses its cookie and CSRF token so
+	// the older workflow tests read as before, now as a real authenticated client.
+	admin *client
 }
 
 // newTestEnv creates a throwaway database per test so tests cannot collide and
@@ -61,8 +69,27 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if err := database.Migrate(ctx, pool, logger); err != nil {
+
+	// Same bootstrap ordering as production: the admin must exist before the
+	// ownership migration backfills history.
+	adminUsername := "admin"
+	adminPassword := "Test-Admin-Password-2026"
+	authSvc := auth.NewService(pool, logger, auth.DefaultPolicy())
+	migrator := database.Migrator{
+		Logger: logger,
+		AfterMigration: map[string]func(context.Context, *pgxpool.Pool) error{
+			"0003_auth": func(hookCtx context.Context, hookPool *pgxpool.Pool) error {
+				_, err := auth.NewService(hookPool, logger, auth.DefaultPolicy()).
+					BootstrapAdmin(hookCtx, adminUsername, adminPassword)
+				return err
+			},
+		},
+	}
+	if err := database.MigrateWithHooks(ctx, pool, migrator); err != nil {
 		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := authSvc.BootstrapAdmin(ctx, adminUsername, adminPassword); err != nil {
+		t.Fatalf("bootstrap admin: %v", err)
 	}
 
 	// Drop the database after the test, from a separate connection because the
@@ -81,11 +108,21 @@ func newTestEnv(t *testing.T) *testEnv {
 		loc = time.UTC
 	}
 	svc := service.New(pool, logger, loc)
-	srv := api.NewServer(api.Options{Service: svc, Logger: logger, Pool: pool, Version: "test"})
+	srv := api.NewServer(api.Options{
+		Service: svc, Auth: authSvc, Logger: logger, Pool: pool, Version: "test",
+	})
 	httpServer := httptest.NewServer(srv.Router())
 	t.Cleanup(httpServer.Close)
 
-	return &testEnv{t: t, server: httpServer, pool: pool}
+	env := &testEnv{
+		t: t, server: httpServer, pool: pool, auth: authSvc, svc: svc,
+		adminUsername: adminUsername, adminPassword: adminPassword,
+	}
+	env.admin = env.newClient()
+	if status, payload := env.admin.login(adminUsername, adminPassword); status != http.StatusOK {
+		t.Fatalf("admin login: %d (%v)", status, payload)
+	}
+	return env
 }
 
 // do performs a request and decodes the JSON body into out (if non-nil).
@@ -105,6 +142,15 @@ func (e *testEnv) do(method, path string, body any, out any) (*http.Response, []
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	// Authenticated as the bootstrap admin, with the CSRF token on writes.
+	if e.admin != nil {
+		if e.admin.csrf != "" {
+			req.Header.Set("X-CSRF-Token", e.admin.csrf)
+		}
+		for _, cookie := range e.admin.http.Jar.Cookies(mustParseURL(e.t, e.server.URL)) {
+			req.AddCookie(cookie)
+		}
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

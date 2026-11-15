@@ -9,7 +9,7 @@ import { Button, Card, EmptyState, ErrorBanner, Field, Input, Skeleton } from '.
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ExercisePicker } from '../components/ExercisePicker'
 import { ApiError, templatesApi, type TemplateInput } from '../lib/api'
-import type { Exercise } from '../lib/types'
+import type { Exercise, ExerciseKind } from '../lib/types'
 import { plural } from '../lib/format'
 import { queryKeys } from '../lib/queryKeys'
 
@@ -17,9 +17,11 @@ interface DraftExercise {
   key: string
   exerciseId: number
   name: string
+  kind: ExerciseKind
   plannedSets: string
   plannedReps: string
   plannedWeightKg: string
+  plannedMinutes: string
 }
 
 export function TemplateEditorPage() {
@@ -54,6 +56,9 @@ export function TemplateEditorPage() {
         key: String(exercise.id),
         exerciseId: exercise.exerciseId,
         name: exercise.exerciseName,
+        kind: (exercise as { kind?: ExerciseKind }).kind ?? 'weighted',
+        plannedMinutes:
+          exercise.plannedDurationSeconds === null ? '' : String(exercise.plannedDurationSeconds / 60),
         plannedSets: exercise.plannedSets === null ? '' : String(exercise.plannedSets),
         plannedReps: exercise.plannedReps === null ? '' : String(exercise.plannedReps),
         plannedWeightKg: exercise.plannedWeightKg === null ? '' : String(exercise.plannedWeightKg),
@@ -103,12 +108,17 @@ export function TemplateEditorPage() {
     save.mutate({
       name: name.trim(),
       description: description.trim(),
-      exercises: exercises.map((exercise) => ({
-        exerciseId: exercise.exerciseId,
-        plannedSets: parseOptionalInt(exercise.plannedSets),
-        plannedReps: parseOptionalInt(exercise.plannedReps),
-        plannedWeightKg: parseOptionalFloat(exercise.plannedWeightKg),
-      })),
+      exercises: exercises.map((exercise) => {
+        const timed = exercise.kind === 'duration'
+        const minutes = parseOptionalFloat(exercise.plannedMinutes)
+        return {
+          exerciseId: exercise.exerciseId,
+          plannedSets: timed ? null : parseOptionalInt(exercise.plannedSets),
+          plannedReps: timed ? null : parseOptionalInt(exercise.plannedReps),
+          plannedWeightKg: timed ? null : parseOptionalFloat(exercise.plannedWeightKg),
+          plannedDurationSeconds: minutes === null ? null : Math.round(minutes * 60),
+        }
+      }),
     })
   }
 
@@ -124,9 +134,11 @@ export function TemplateEditorPage() {
         key: `${exerciseId}-${Date.now()}`,
         exerciseId,
         name: picked?.name ?? 'Упражнение',
+        kind: picked?.kind ?? 'weighted',
         plannedSets: '3',
         plannedReps: '8',
         plannedWeightKg: '',
+        plannedMinutes: '30',
       },
     ])
     setPickerOpen(false)
@@ -244,42 +256,64 @@ export function TemplateEditorPage() {
                         <span className="mr-1.5 text-ink-faint tabular">{index + 1}.</span>
                         {exercise.name}
                       </p>
-                      <div className="mt-2 grid grid-cols-3 gap-2">
-                        <label className="block">
-                          <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">Подходы</span>
-                          <Input
-                            type="text"
-                            inputMode="numeric"
-                            value={exercise.plannedSets}
-                            onChange={(event) => update(index, { plannedSets: event.target.value })}
-                            className="text-center"
-                            aria-label={`Планируемые подходы для ${exercise.name}`}
-                          />
-                        </label>
-                        <label className="block">
-                          <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">Повторы</span>
-                          <Input
-                            type="text"
-                            inputMode="numeric"
-                            value={exercise.plannedReps}
-                            onChange={(event) => update(index, { plannedReps: event.target.value })}
-                            className="text-center"
-                            aria-label={`Планируемые повторения для ${exercise.name}`}
-                          />
-                        </label>
-                        <label className="block">
-                          <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">Вес, кг</span>
-                          <Input
-                            type="text"
-                            inputMode="decimal"
-                            value={exercise.plannedWeightKg}
-                            onChange={(event) => update(index, { plannedWeightKg: event.target.value })}
-                            className="text-center"
-                            placeholder="—"
-                            aria-label={`Планируемый вес для ${exercise.name}`}
-                          />
-                        </label>
-                      </div>
+                      {exercise.kind === 'duration' ? (
+                        <div className="mt-2">
+                          <label className="block">
+                            <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">
+                              Планируемое время, мин
+                            </span>
+                            <Input
+                              type="text"
+                              inputMode="decimal"
+                              value={exercise.plannedMinutes}
+                              onChange={(event) => update(index, { plannedMinutes: event.target.value })}
+                              className="text-center"
+                              placeholder="30"
+                              aria-label={`Планируемая длительность для ${exercise.name}`}
+                            />
+                          </label>
+                        </div>
+                      ) : (
+                        <div className="mt-2 grid grid-cols-3 gap-2">
+                          <label className="block">
+                            <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">Подходы</span>
+                            <Input
+                              type="text"
+                              inputMode="numeric"
+                              value={exercise.plannedSets}
+                              onChange={(event) => update(index, { plannedSets: event.target.value })}
+                              className="text-center"
+                              aria-label={`Планируемые подходы для ${exercise.name}`}
+                            />
+                          </label>
+                          <label className="block">
+                            <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">Повторы</span>
+                            <Input
+                              type="text"
+                              inputMode="numeric"
+                              value={exercise.plannedReps}
+                              onChange={(event) => update(index, { plannedReps: event.target.value })}
+                              className="text-center"
+                              aria-label={`Планируемые повторения для ${exercise.name}`}
+                            />
+                          </label>
+                          <label className="block">
+                            <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">
+                              {exercise.kind === 'bodyweight' ? 'Вес (не нужен)' : 'Вес, кг'}
+                            </span>
+                            <Input
+                              type="text"
+                              inputMode="decimal"
+                              value={exercise.plannedWeightKg}
+                              onChange={(event) => update(index, { plannedWeightKg: event.target.value })}
+                              className="text-center"
+                              placeholder="—"
+                              disabled={exercise.kind === 'bodyweight'}
+                              aria-label={`Планируемый вес для ${exercise.name}`}
+                            />
+                          </label>
+                        </div>
+                      )}
                     </div>
                     <div className="flex shrink-0 flex-col">
                       <button

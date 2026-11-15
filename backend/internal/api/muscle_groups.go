@@ -59,7 +59,7 @@ func (s *Server) handleCreateMuscleGroup(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, s.log, err)
 		return
 	}
-	g, err := s.svc.CreateMuscleGroup(r.Context(), service.MuscleGroupInput{
+	g, err := s.svc.CreateMuscleGroup(r.Context(), mustActor(r), service.MuscleGroupInput{
 		Name: req.Name, Description: req.Description,
 	})
 	if err != nil {
@@ -80,7 +80,7 @@ func (s *Server) handleUpdateMuscleGroup(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, s.log, err)
 		return
 	}
-	g, err := s.svc.UpdateMuscleGroup(r.Context(), id, service.MuscleGroupInput{
+	g, err := s.svc.UpdateMuscleGroup(r.Context(), mustActor(r), id, service.MuscleGroupInput{
 		Name: req.Name, Description: req.Description,
 	})
 	if err != nil {
@@ -96,7 +96,7 @@ func (s *Server) handleDeleteMuscleGroup(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, s.log, err)
 		return
 	}
-	if err := s.svc.DeleteMuscleGroup(r.Context(), id); err != nil {
+	if err := s.svc.DeleteMuscleGroup(r.Context(), mustActor(r), id); err != nil {
 		writeError(w, r, s.log, err)
 		return
 	}

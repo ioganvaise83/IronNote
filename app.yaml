@@ -2,9 +2,10 @@
 id: ironnote
 name: IronNote
 purpose: >
-  Личный дневник силовых тренировок: справочники групп мышц и упражнений,
-  шаблоны, запись подходов, история и базовая статистика прогресса. Без
-  авторизации, без рекомендаций и без AI — только фактические данные.
+  Дневник силовых тренировок для небольшой группы людей: справочники групп мышц и
+  упражнений, шаблоны, запись подходов, история и базовая статистика прогресса.
+  Многопользовательский, с ролями admin/user и изоляцией данных; без
+  рекомендаций и без AI — только фактические данные.
 
 status: active
 type: fullstack
@@ -24,7 +25,9 @@ stack:
   notes: >
     React 18 + TypeScript + Vite + Tailwind + React Router + TanStack Query on the
     front, Go + chi + pgx/v5 + sqlc on the back, PostgreSQL 16 with SQL migrations
-    embedded in the binary and applied on boot.
+    embedded in the binary and applied on boot. Auth: Argon2id password hashes,
+    opaque session tokens stored as SHA-256, CSRF tokens, per-IP and per-account
+    rate limiting, role checks at the route and service layers.
 
 components:
   frontend:
@@ -48,9 +51,16 @@ env:
   required:
     - POSTGRES_PASSWORD
     - DATABASE_URL
+    - IRONNOTE_ADMIN_PASSWORD
   optional:
     - POSTGRES_USER
     - POSTGRES_DB
+    - IRONNOTE_ADMIN_USERNAME
+    - IRONNOTE_REQUIRE_STRONG_ADMIN_PASSWORD
+    - IRONNOTE_COOKIE_SECURE
+    - IRONNOTE_PUBLIC_ORIGIN
+    - IRONNOTE_TRUSTED_PROXIES
+    - APP_BIND_ADDRESS
     - APP_PORT
     - APP_TIMEZONE
     - LOG_LEVEL
@@ -62,6 +72,7 @@ env:
 docs:
   readme: README.md
   architecture: docs/architecture.md
+  security: docs/security.md
   api: docs/api.md
 
 knowledge:

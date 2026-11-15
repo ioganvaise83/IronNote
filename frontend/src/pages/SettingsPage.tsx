@@ -8,12 +8,15 @@ import { PageHeader } from '../components/AppShell'
 import { Button, Card, ErrorBanner, Field, Input, Skeleton } from '../components/ui'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ApiError, exercisesApi, muscleGroupsApi } from '../lib/api'
+import { useAuth, useIsAdmin } from '../lib/auth'
 import type { MuscleGroup } from '../lib/types'
 import { plural } from '../lib/format'
 import { queryKeys } from '../lib/queryKeys'
 
 export function SettingsPage() {
   const queryClient = useQueryClient()
+  const isAdmin = useIsAdmin()
+  const { user, logout } = useAuth()
   const [error, setError] = useState<string | null>(null)
   const [details, setDetails] = useState<Record<string, string>>({})
   const [editing, setEditing] = useState<MuscleGroup | 'new' | null>(null)
@@ -106,13 +109,15 @@ export function SettingsPage() {
       <section className="mb-6">
         <div className="mb-2 flex items-center justify-between">
           <h2 className="section-title">Группы мышц</h2>
-          <button
-            type="button"
-            onClick={openNew}
-            className="-mr-2 inline-flex min-h-tap items-center rounded-lg px-2 text-sm font-medium text-accent"
-          >
-            Добавить
-          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={openNew}
+              className="-mr-2 inline-flex min-h-tap items-center rounded-lg px-2 text-sm font-medium text-accent"
+            >
+              Добавить
+            </button>
+          )}
         </div>
 
         {groupsQuery.isPending && <Skeleton className="h-40 w-full" />}
@@ -128,28 +133,30 @@ export function SettingsPage() {
                   <p className="truncate font-medium">{group.name}</p>
                   {group.description && <p className="truncate text-xs text-ink-faint">{group.description}</p>}
                 </div>
-                <div className="flex shrink-0 gap-1">
-                  <button
-                    type="button"
-                    onClick={() => openEdit(group)}
-                    className="grid h-11 w-11 place-items-center rounded-lg text-ink-faint hover:bg-surface-hover hover:text-ink"
-                    aria-label={`Изменить ${group.name}`}
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-4 w-4">
-                      <path d="M4 20h4l10-10a2.8 2.8 0 0 0-4-4L4 16v4z" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setToDelete(group)}
-                    className="grid h-11 w-11 place-items-center rounded-lg text-ink-faint hover:bg-danger/10 hover:text-danger"
-                    aria-label={`Удалить ${group.name}`}
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-4 w-4">
-                      <path d="M6 7h12M10 7V5h4v2M8 7l1 12h6l1-12" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  </button>
-                </div>
+                {isAdmin && (
+                  <div className="flex shrink-0 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => openEdit(group)}
+                      className="grid h-11 w-11 place-items-center rounded-lg text-ink-faint hover:bg-surface-hover hover:text-ink"
+                      aria-label={`Изменить ${group.name}`}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-4 w-4">
+                        <path d="M4 20h4l10-10a2.8 2.8 0 0 0-4-4L4 16v4z" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setToDelete(group)}
+                      className="grid h-11 w-11 place-items-center rounded-lg text-ink-faint hover:bg-danger/10 hover:text-danger"
+                      aria-label={`Удалить ${group.name}`}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-4 w-4">
+                        <path d="M6 7h12M10 7V5h4v2M8 7l1 12h6l1-12" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
           </Card>
@@ -187,12 +194,52 @@ export function SettingsPage() {
             <Link to="/exercises">
               <Button variant="secondary">Открыть справочник</Button>
             </Link>
-            <Link to="/exercises/new">
-              <Button variant="ghost">Добавить упражнение</Button>
-            </Link>
+            {isAdmin && (
+              <Link to="/exercises/new">
+                <Button variant="ghost">Добавить упражнение</Button>
+              </Link>
+            )}
           </div>
         </Card>
       </section>
+
+      <section className="mb-6">
+        <h2 className="section-title mb-2">Учётная запись</h2>
+        <Card className="p-4">
+          <p className="text-sm">
+            <span className="font-medium">{user?.displayName || user?.username}</span>
+            <span className="text-ink-faint"> · {user?.username}</span>
+          </p>
+          <p className="mt-0.5 text-xs text-ink-faint">
+            {user?.role === 'admin' ? 'Администратор' : 'Пользователь'}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Link to="/change-password">
+              <Button variant="secondary">Сменить пароль</Button>
+            </Link>
+            <Button variant="ghost" onClick={() => void logout()}>
+              Выйти
+            </Button>
+          </div>
+        </Card>
+      </section>
+
+      {isAdmin && (
+        <section className="mb-6">
+          <h2 className="section-title mb-2">Администрирование</h2>
+          <Card className="p-4">
+            <p className="text-sm text-ink-muted">
+              Пользователи, роли и сброс паролей. Только администраторы могут управлять
+              справочниками и учётными записями.
+            </p>
+            <div className="mt-3">
+              <Link to="/users">
+                <Button variant="secondary">Пользователи</Button>
+              </Link>
+            </div>
+          </Card>
+        </section>
+      )}
 
       <section className="mb-6">
         <h2 className="section-title mb-2">О приложении</h2>
@@ -203,8 +250,8 @@ export function SettingsPage() {
             статистику по ним.
           </p>
           <p>
-            Все данные хранятся в PostgreSQL на вашем собственном сервере. Приложение рассчитано на одного
-            пользователя и не требует регистрации.
+            Все данные хранятся в PostgreSQL на вашем сервере. Каждый участник видит только свои
+            тренировки; справочники упражнений и групп мышц ведёт администратор.
           </p>
         </Card>
       </section>

@@ -21,6 +21,7 @@ type exerciseResponse struct {
 	Name         string                  `json:"name"`
 	Description  string                  `json:"description"`
 	Equipment    string                  `json:"equipment"`
+	Kind         string                  `json:"kind"`
 	IsArchived   bool                    `json:"isArchived"`
 	MuscleGroups []exerciseGroupResponse `json:"muscleGroups"`
 	CreatedAt    string                  `json:"createdAt"`
@@ -36,7 +37,7 @@ func exerciseJSON(e service.Exercise) exerciseResponse {
 	}
 	return exerciseResponse{
 		ID: e.ID, Name: e.Name, Description: e.Description, Equipment: e.Equipment,
-		IsArchived: e.IsArchived, MuscleGroups: groups,
+		Kind: string(e.Kind), IsArchived: e.IsArchived, MuscleGroups: groups,
 		CreatedAt: timeJSON(e.CreatedAt), UpdatedAt: timeJSON(e.UpdatedAt),
 	}
 }
@@ -45,6 +46,7 @@ type exerciseRequest struct {
 	Name         string                     `json:"name"`
 	Description  string                     `json:"description"`
 	Equipment    string                     `json:"equipment"`
+	Kind         string                     `json:"kind"`
 	MuscleGroups []service.ExerciseGroupRef `json:"muscleGroups"`
 }
 
@@ -53,8 +55,13 @@ func (r exerciseRequest) toInput() service.ExerciseInput {
 	if groups == nil {
 		groups = []service.ExerciseGroupRef{}
 	}
+	kind := service.ParseKind(r.Kind)
+	if r.Kind == "" {
+		kind = service.KindWeighted // backwards compatible default
+	}
 	return service.ExerciseInput{
-		Name: r.Name, Description: r.Description, Equipment: r.Equipment, MuscleGroups: groups,
+		Name: r.Name, Description: r.Description, Equipment: r.Equipment,
+		Kind: kind, MuscleGroups: groups,
 	}
 }
 
@@ -103,7 +110,7 @@ func (s *Server) handleCreateExercise(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.log, err)
 		return
 	}
-	e, err := s.svc.CreateExercise(r.Context(), req.toInput())
+	e, err := s.svc.CreateExercise(r.Context(), mustActor(r), req.toInput())
 	if err != nil {
 		writeError(w, r, s.log, err)
 		return
@@ -122,7 +129,7 @@ func (s *Server) handleUpdateExercise(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.log, err)
 		return
 	}
-	e, err := s.svc.UpdateExercise(r.Context(), id, req.toInput())
+	e, err := s.svc.UpdateExercise(r.Context(), mustActor(r), id, req.toInput())
 	if err != nil {
 		writeError(w, r, s.log, err)
 		return
@@ -136,7 +143,7 @@ func (s *Server) handleDeleteExercise(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.log, err)
 		return
 	}
-	if err := s.svc.DeleteExercise(r.Context(), id); err != nil {
+	if err := s.svc.DeleteExercise(r.Context(), mustActor(r), id); err != nil {
 		writeError(w, r, s.log, err)
 		return
 	}
@@ -157,7 +164,7 @@ func (s *Server) setArchived(w http.ResponseWriter, r *http.Request, archived bo
 		writeError(w, r, s.log, err)
 		return
 	}
-	e, err := s.svc.SetExerciseArchived(r.Context(), id, archived)
+	e, err := s.svc.SetExerciseArchived(r.Context(), mustActor(r), id, archived)
 	if err != nil {
 		writeError(w, r, s.log, err)
 		return

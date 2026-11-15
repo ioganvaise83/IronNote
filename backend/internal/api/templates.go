@@ -7,14 +7,15 @@ import (
 )
 
 type templateExerciseResponse struct {
-	ID               int64    `json:"id"`
-	ExerciseID       int64    `json:"exerciseId"`
-	ExerciseName     string   `json:"exerciseName"`
-	ExerciseArchived bool     `json:"exerciseArchived"`
-	SortOrder        int32    `json:"sortOrder"`
-	PlannedSets      *int32   `json:"plannedSets"`
-	PlannedReps      *int32   `json:"plannedReps"`
-	PlannedWeightKg  *float64 `json:"plannedWeightKg"`
+	ID                     int64    `json:"id"`
+	ExerciseID             int64    `json:"exerciseId"`
+	ExerciseName           string   `json:"exerciseName"`
+	ExerciseArchived       bool     `json:"exerciseArchived"`
+	SortOrder              int32    `json:"sortOrder"`
+	PlannedSets            *int32   `json:"plannedSets"`
+	PlannedReps            *int32   `json:"plannedReps"`
+	PlannedWeightKg        *float64 `json:"plannedWeightKg"`
+	PlannedDurationSeconds *int32   `json:"plannedDurationSeconds"`
 }
 
 type templateResponse struct {
@@ -57,7 +58,8 @@ func templateJSON(t service.Template) templateResponse {
 			ID: e.ID, ExerciseID: e.ExerciseID, ExerciseName: e.ExerciseName,
 			ExerciseArchived: e.ExerciseArchived, SortOrder: e.SortOrder,
 			PlannedSets: e.PlannedSets, PlannedReps: e.PlannedReps,
-			PlannedWeightKg: e.PlannedWeightKg.Ptr(),
+			PlannedWeightKg:        e.PlannedWeightKg.Ptr(),
+			PlannedDurationSeconds: e.PlannedDurationSeconds,
 		})
 	}
 	return templateResponse{
@@ -67,7 +69,7 @@ func templateJSON(t service.Template) templateResponse {
 }
 
 func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
-	items, err := s.svc.ListTemplates(r.Context())
+	items, err := s.svc.ListTemplates(r.Context(), mustActor(r))
 	if err != nil {
 		writeError(w, r, s.log, err)
 		return
@@ -89,7 +91,7 @@ func (s *Server) handleGetTemplate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.log, err)
 		return
 	}
-	t, err := s.svc.GetTemplate(r.Context(), id)
+	t, err := s.svc.GetTemplate(r.Context(), mustActor(r), id)
 	if err != nil {
 		writeError(w, r, s.log, err)
 		return
@@ -103,7 +105,7 @@ func (s *Server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.log, err)
 		return
 	}
-	t, err := s.svc.CreateTemplate(r.Context(), req.toInput())
+	t, err := s.svc.CreateTemplate(r.Context(), mustActor(r), req.toInput())
 	if err != nil {
 		writeError(w, r, s.log, err)
 		return
@@ -122,7 +124,7 @@ func (s *Server) handleUpdateTemplate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.log, err)
 		return
 	}
-	t, err := s.svc.UpdateTemplate(r.Context(), id, req.toInput())
+	t, err := s.svc.UpdateTemplate(r.Context(), mustActor(r), id, req.toInput())
 	if err != nil {
 		writeError(w, r, s.log, err)
 		return
@@ -136,7 +138,7 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, s.log, err)
 		return
 	}
-	if err := s.svc.DeleteTemplate(r.Context(), id); err != nil {
+	if err := s.svc.DeleteTemplate(r.Context(), mustActor(r), id); err != nil {
 		writeError(w, r, s.log, err)
 		return
 	}
@@ -149,7 +151,7 @@ func (s *Server) handleStartFromTemplate(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, s.log, err)
 		return
 	}
-	session, err := s.svc.StartSession(r.Context(), service.StartSessionInput{TemplateID: &id})
+	session, err := s.svc.StartSession(r.Context(), mustActor(r), service.StartSessionInput{TemplateID: &id})
 	if err != nil {
 		writeError(w, r, s.log, err)
 		return

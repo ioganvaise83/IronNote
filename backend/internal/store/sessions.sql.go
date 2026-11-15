@@ -13,7 +13,11 @@ import (
 
 const addSessionExercise = `-- name: AddSessionExercise :one
 INSERT INTO workout_session_exercises (workout_session_id, exercise_id, sort_order, notes)
-VALUES ($1, $2, $3, $4)
+SELECT $1, $2, $3, $4
+WHERE EXISTS (
+    SELECT 1 FROM workout_sessions
+    WHERE id = $1 AND user_id = $5
+)
 RETURNING id, workout_session_id, exercise_id, sort_order, notes
 `
 
@@ -22,14 +26,18 @@ type AddSessionExerciseParams struct {
 	ExerciseID       int64
 	SortOrder        int32
 	Notes            string
+	UserID           int64
 }
 
+// The SELECT guard makes the insert fail (no rows) when the session belongs to
+// somebody else, so an unowned write is impossible even if a caller forgets.
 func (q *Queries) AddSessionExercise(ctx context.Context, arg AddSessionExerciseParams) (WorkoutSessionExercise, error) {
 	row := q.db.QueryRow(ctx, addSessionExercise,
 		arg.WorkoutSessionID,
 		arg.ExerciseID,
 		arg.SortOrder,
 		arg.Notes,
+		arg.UserID,
 	)
 	var i WorkoutSessionExercise
 	err := row.Scan(
@@ -43,36 +51,74 @@ func (q *Queries) AddSessionExercise(ctx context.Context, arg AddSessionExercise
 }
 
 const addSet = `-- name: AddSet :one
-INSERT INTO workout_sets (workout_exercise_id, set_number, weight_kg, repetitions, is_warmup, is_completed)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, workout_exercise_id, set_number, weight_kg, repetitions, is_warmup, is_completed
+INSERT INTO workout_sets (
+    workout_exercise_id, set_number, kind, weight_kg, repetitions,
+    duration_seconds, distance_meters, is_warmup, is_completed
+)
+SELECT $1, $2, $3::exercise_kind,
+       $4, $5,
+       $6, $7,
+       $8, $9
+WHERE EXISTS (
+    SELECT 1
+    FROM workout_session_exercises se
+    JOIN workout_sessions s ON s.id = se.workout_session_id
+    WHERE se.id = $1 AND s.user_id = $10
+)
+RETURNING id, workout_exercise_id, set_number, kind::text AS kind, weight_kg, repetitions,
+          duration_seconds, distance_meters, is_warmup, is_completed
 `
 
 type AddSetParams struct {
 	WorkoutExerciseID int64
 	SetNumber         int32
+	Kind              ExerciseKind
 	WeightKg          pgtype.Numeric
-	Repetitions       int16
+	Repetitions       *int16
+	DurationSeconds   *int32
+	DistanceMeters    pgtype.Numeric
+	IsWarmup          bool
+	IsCompleted       bool
+	UserID            int64
+}
+
+type AddSetRow struct {
+	ID                int64
+	WorkoutExerciseID int64
+	SetNumber         int32
+	Kind              string
+	WeightKg          pgtype.Numeric
+	Repetitions       *int16
+	DurationSeconds   *int32
+	DistanceMeters    pgtype.Numeric
 	IsWarmup          bool
 	IsCompleted       bool
 }
 
-func (q *Queries) AddSet(ctx context.Context, arg AddSetParams) (WorkoutSet, error) {
+// The EXISTS guard rejects a write to an exercise row the actor does not own.
+func (q *Queries) AddSet(ctx context.Context, arg AddSetParams) (AddSetRow, error) {
 	row := q.db.QueryRow(ctx, addSet,
 		arg.WorkoutExerciseID,
 		arg.SetNumber,
+		arg.Kind,
 		arg.WeightKg,
 		arg.Repetitions,
+		arg.DurationSeconds,
+		arg.DistanceMeters,
 		arg.IsWarmup,
 		arg.IsCompleted,
+		arg.UserID,
 	)
-	var i WorkoutSet
+	var i AddSetRow
 	err := row.Scan(
 		&i.ID,
 		&i.WorkoutExerciseID,
 		&i.SetNumber,
+		&i.Kind,
 		&i.WeightKg,
 		&i.Repetitions,
+		&i.DurationSeconds,
+		&i.DistanceMeters,
 		&i.IsWarmup,
 		&i.IsCompleted,
 	)
@@ -80,26 +126,40 @@ func (q *Queries) AddSet(ctx context.Context, arg AddSetParams) (WorkoutSet, err
 }
 
 const createSession = `-- name: CreateSession :one
-INSERT INTO workout_sessions (template_id, name, started_at, status, notes)
-VALUES ($1, $2, $3, 'in_progress', $4)
+INSERT INTO workout_sessions (user_id, template_id, name, started_at, status, notes)
+VALUES ($1, $2, $3, $4, 'in_progress', $5)
 RETURNING id, template_id, name, started_at, finished_at, status, notes, created_at, updated_at
 `
 
 type CreateSessionParams struct {
+	UserID     int64
 	TemplateID *int64
 	Name       string
 	StartedAt  pgtype.Timestamptz
 	Notes      string
 }
 
-func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (WorkoutSession, error) {
+type CreateSessionRow struct {
+	ID         int64
+	TemplateID *int64
+	Name       string
+	StartedAt  pgtype.Timestamptz
+	FinishedAt pgtype.Timestamptz
+	Status     string
+	Notes      string
+	CreatedAt  pgtype.Timestamptz
+	UpdatedAt  pgtype.Timestamptz
+}
+
+func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (CreateSessionRow, error) {
 	row := q.db.QueryRow(ctx, createSession,
+		arg.UserID,
 		arg.TemplateID,
 		arg.Name,
 		arg.StartedAt,
 		arg.Notes,
 	)
-	var i WorkoutSession
+	var i CreateSessionRow
 	err := row.Scan(
 		&i.ID,
 		&i.TemplateID,
@@ -115,11 +175,16 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (W
 }
 
 const deleteSession = `-- name: DeleteSession :execrows
-DELETE FROM workout_sessions WHERE id = $1
+DELETE FROM workout_sessions WHERE id = $1 AND user_id = $2
 `
 
-func (q *Queries) DeleteSession(ctx context.Context, id int64) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteSession, id)
+type DeleteSessionParams struct {
+	ID     int64
+	UserID int64
+}
+
+func (q *Queries) DeleteSession(ctx context.Context, arg DeleteSessionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteSession, arg.ID, arg.UserID)
 	if err != nil {
 		return 0, err
 	}
@@ -127,17 +192,20 @@ func (q *Queries) DeleteSession(ctx context.Context, id int64) (int64, error) {
 }
 
 const deleteSessionExercise = `-- name: DeleteSessionExercise :execrows
-DELETE FROM workout_session_exercises
-WHERE id = $1 AND workout_session_id = $2
+DELETE FROM workout_session_exercises se
+USING workout_sessions s
+WHERE se.id = $1 AND se.workout_session_id = $2
+  AND s.id = se.workout_session_id AND s.user_id = $3
 `
 
 type DeleteSessionExerciseParams struct {
 	ID               int64
 	WorkoutSessionID int64
+	UserID           int64
 }
 
 func (q *Queries) DeleteSessionExercise(ctx context.Context, arg DeleteSessionExerciseParams) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteSessionExercise, arg.ID, arg.WorkoutSessionID)
+	result, err := q.db.Exec(ctx, deleteSessionExercise, arg.ID, arg.WorkoutSessionID, arg.UserID)
 	if err != nil {
 		return 0, err
 	}
@@ -145,11 +213,21 @@ func (q *Queries) DeleteSessionExercise(ctx context.Context, arg DeleteSessionEx
 }
 
 const deleteSet = `-- name: DeleteSet :execrows
-DELETE FROM workout_sets WHERE id = $1
+DELETE FROM workout_sets st
+USING workout_session_exercises se, workout_sessions s
+WHERE st.id = $1
+  AND se.id = st.workout_exercise_id
+  AND s.id = se.workout_session_id
+  AND s.user_id = $2
 `
 
-func (q *Queries) DeleteSet(ctx context.Context, id int64) (int64, error) {
-	result, err := q.db.Exec(ctx, deleteSet, id)
+type DeleteSetParams struct {
+	ID     int64
+	UserID int64
+}
+
+func (q *Queries) DeleteSet(ctx context.Context, arg DeleteSetParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteSet, arg.ID, arg.UserID)
 	if err != nil {
 		return 0, err
 	}
@@ -157,13 +235,19 @@ func (q *Queries) DeleteSet(ctx context.Context, id int64) (int64, error) {
 }
 
 const findSessionExerciseByID = `-- name: FindSessionExerciseByID :one
-SELECT id, workout_session_id, exercise_id, sort_order, notes
-FROM workout_session_exercises
-WHERE id = $1
+SELECT se.id, se.workout_session_id, se.exercise_id, se.sort_order, se.notes
+FROM workout_session_exercises se
+JOIN workout_sessions s ON s.id = se.workout_session_id
+WHERE se.id = $1 AND s.user_id = $2
 `
 
-func (q *Queries) FindSessionExerciseByID(ctx context.Context, id int64) (WorkoutSessionExercise, error) {
-	row := q.db.QueryRow(ctx, findSessionExerciseByID, id)
+type FindSessionExerciseByIDParams struct {
+	ID     int64
+	UserID int64
+}
+
+func (q *Queries) FindSessionExerciseByID(ctx context.Context, arg FindSessionExerciseByIDParams) (WorkoutSessionExercise, error) {
+	row := q.db.QueryRow(ctx, findSessionExerciseByID, arg.ID, arg.UserID)
 	var i WorkoutSessionExercise
 	err := row.Scan(
 		&i.ID,
@@ -178,18 +262,31 @@ func (q *Queries) FindSessionExerciseByID(ctx context.Context, id int64) (Workou
 const finishSession = `-- name: FinishSession :one
 UPDATE workout_sessions
 SET status = 'completed', finished_at = $2
-WHERE id = $1
+WHERE id = $1 AND user_id = $3
 RETURNING id, template_id, name, started_at, finished_at, status, notes, created_at, updated_at
 `
 
 type FinishSessionParams struct {
 	ID         int64
 	FinishedAt pgtype.Timestamptz
+	UserID     int64
 }
 
-func (q *Queries) FinishSession(ctx context.Context, arg FinishSessionParams) (WorkoutSession, error) {
-	row := q.db.QueryRow(ctx, finishSession, arg.ID, arg.FinishedAt)
-	var i WorkoutSession
+type FinishSessionRow struct {
+	ID         int64
+	TemplateID *int64
+	Name       string
+	StartedAt  pgtype.Timestamptz
+	FinishedAt pgtype.Timestamptz
+	Status     string
+	Notes      string
+	CreatedAt  pgtype.Timestamptz
+	UpdatedAt  pgtype.Timestamptz
+}
+
+func (q *Queries) FinishSession(ctx context.Context, arg FinishSessionParams) (FinishSessionRow, error) {
+	row := q.db.QueryRow(ctx, finishSession, arg.ID, arg.FinishedAt, arg.UserID)
+	var i FinishSessionRow
 	err := row.Scan(
 		&i.ID,
 		&i.TemplateID,
@@ -207,13 +304,26 @@ func (q *Queries) FinishSession(ctx context.Context, arg FinishSessionParams) (W
 const getActiveSession = `-- name: GetActiveSession :one
 SELECT id, template_id, name, started_at, finished_at, status, notes, created_at, updated_at
 FROM workout_sessions
-WHERE status = 'in_progress'
+WHERE status = 'in_progress' AND user_id = $1
 LIMIT 1
 `
 
-func (q *Queries) GetActiveSession(ctx context.Context) (WorkoutSession, error) {
-	row := q.db.QueryRow(ctx, getActiveSession)
-	var i WorkoutSession
+type GetActiveSessionRow struct {
+	ID         int64
+	TemplateID *int64
+	Name       string
+	StartedAt  pgtype.Timestamptz
+	FinishedAt pgtype.Timestamptz
+	Status     string
+	Notes      string
+	CreatedAt  pgtype.Timestamptz
+	UpdatedAt  pgtype.Timestamptz
+}
+
+// Scoped to the owner: "the workout in progress" is per person, never global.
+func (q *Queries) GetActiveSession(ctx context.Context, userID int64) (GetActiveSessionRow, error) {
+	row := q.db.QueryRow(ctx, getActiveSession, userID)
+	var i GetActiveSessionRow
 	err := row.Scan(
 		&i.ID,
 		&i.TemplateID,
@@ -231,12 +341,31 @@ func (q *Queries) GetActiveSession(ctx context.Context) (WorkoutSession, error) 
 const getSession = `-- name: GetSession :one
 SELECT id, template_id, name, started_at, finished_at, status, notes, created_at, updated_at
 FROM workout_sessions
-WHERE id = $1
+WHERE id = $1 AND user_id = $2
 `
 
-func (q *Queries) GetSession(ctx context.Context, id int64) (WorkoutSession, error) {
-	row := q.db.QueryRow(ctx, getSession, id)
-	var i WorkoutSession
+type GetSessionParams struct {
+	ID     int64
+	UserID int64
+}
+
+type GetSessionRow struct {
+	ID         int64
+	TemplateID *int64
+	Name       string
+	StartedAt  pgtype.Timestamptz
+	FinishedAt pgtype.Timestamptz
+	Status     string
+	Notes      string
+	CreatedAt  pgtype.Timestamptz
+	UpdatedAt  pgtype.Timestamptz
+}
+
+// Always owner-scoped. There is deliberately no unscoped "get session by id":
+// forgetting the filter then becomes impossible rather than a data leak.
+func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (GetSessionRow, error) {
+	row := q.db.QueryRow(ctx, getSession, arg.ID, arg.UserID)
+	var i GetSessionRow
 	err := row.Scan(
 		&i.ID,
 		&i.TemplateID,
@@ -252,18 +381,22 @@ func (q *Queries) GetSession(ctx context.Context, id int64) (WorkoutSession, err
 }
 
 const getSessionExercise = `-- name: GetSessionExercise :one
-SELECT id, workout_session_id, exercise_id, sort_order, notes
-FROM workout_session_exercises
-WHERE id = $1 AND workout_session_id = $2
+SELECT se.id, se.workout_session_id, se.exercise_id, se.sort_order, se.notes
+FROM workout_session_exercises se
+JOIN workout_sessions s ON s.id = se.workout_session_id
+WHERE se.id = $1 AND se.workout_session_id = $2 AND s.user_id = $3
 `
 
 type GetSessionExerciseParams struct {
 	ID               int64
 	WorkoutSessionID int64
+	UserID           int64
 }
 
+// Ownership is checked through the parent session, so a guessed exercise id from
+// another user's workout does not resolve.
 func (q *Queries) GetSessionExercise(ctx context.Context, arg GetSessionExerciseParams) (WorkoutSessionExercise, error) {
-	row := q.db.QueryRow(ctx, getSessionExercise, arg.ID, arg.WorkoutSessionID)
+	row := q.db.QueryRow(ctx, getSessionExercise, arg.ID, arg.WorkoutSessionID, arg.UserID)
 	var i WorkoutSessionExercise
 	err := row.Scan(
 		&i.ID,
@@ -276,20 +409,45 @@ func (q *Queries) GetSessionExercise(ctx context.Context, arg GetSessionExercise
 }
 
 const getSet = `-- name: GetSet :one
-SELECT id, workout_exercise_id, set_number, weight_kg, repetitions, is_warmup, is_completed
-FROM workout_sets
-WHERE id = $1
+SELECT st.id, st.workout_exercise_id, st.set_number, st.kind::text AS kind, st.weight_kg, st.repetitions,
+       st.duration_seconds, st.distance_meters,
+       st.is_warmup, st.is_completed
+FROM workout_sets st
+JOIN workout_session_exercises se ON se.id = st.workout_exercise_id
+JOIN workout_sessions s ON s.id = se.workout_session_id
+WHERE st.id = $1 AND s.user_id = $2
 `
 
-func (q *Queries) GetSet(ctx context.Context, id int64) (WorkoutSet, error) {
-	row := q.db.QueryRow(ctx, getSet, id)
-	var i WorkoutSet
+type GetSetParams struct {
+	ID     int64
+	UserID int64
+}
+
+type GetSetRow struct {
+	ID                int64
+	WorkoutExerciseID int64
+	SetNumber         int32
+	Kind              string
+	WeightKg          pgtype.Numeric
+	Repetitions       *int16
+	DurationSeconds   *int32
+	DistanceMeters    pgtype.Numeric
+	IsWarmup          bool
+	IsCompleted       bool
+}
+
+func (q *Queries) GetSet(ctx context.Context, arg GetSetParams) (GetSetRow, error) {
+	row := q.db.QueryRow(ctx, getSet, arg.ID, arg.UserID)
+	var i GetSetRow
 	err := row.Scan(
 		&i.ID,
 		&i.WorkoutExerciseID,
 		&i.SetNumber,
+		&i.Kind,
 		&i.WeightKg,
 		&i.Repetitions,
+		&i.DurationSeconds,
+		&i.DistanceMeters,
 		&i.IsWarmup,
 		&i.IsCompleted,
 	)
@@ -297,22 +455,47 @@ func (q *Queries) GetSet(ctx context.Context, id int64) (WorkoutSet, error) {
 }
 
 const lastSetForExercise = `-- name: LastSetForExercise :one
-SELECT id, workout_exercise_id, set_number, weight_kg, repetitions, is_warmup, is_completed
-FROM workout_sets
-WHERE workout_exercise_id = $1
-ORDER BY set_number DESC
+SELECT st.id, st.workout_exercise_id, st.set_number, st.kind::text AS kind, st.weight_kg, st.repetitions,
+       st.duration_seconds, st.distance_meters,
+       st.is_warmup, st.is_completed
+FROM workout_sets st
+JOIN workout_session_exercises se ON se.id = st.workout_exercise_id
+JOIN workout_sessions s ON s.id = se.workout_session_id
+WHERE st.workout_exercise_id = $1 AND s.user_id = $2
+ORDER BY st.set_number DESC
 LIMIT 1
 `
 
-func (q *Queries) LastSetForExercise(ctx context.Context, workoutExerciseID int64) (WorkoutSet, error) {
-	row := q.db.QueryRow(ctx, lastSetForExercise, workoutExerciseID)
-	var i WorkoutSet
+type LastSetForExerciseParams struct {
+	WorkoutExerciseID int64
+	UserID            int64
+}
+
+type LastSetForExerciseRow struct {
+	ID                int64
+	WorkoutExerciseID int64
+	SetNumber         int32
+	Kind              string
+	WeightKg          pgtype.Numeric
+	Repetitions       *int16
+	DurationSeconds   *int32
+	DistanceMeters    pgtype.Numeric
+	IsWarmup          bool
+	IsCompleted       bool
+}
+
+func (q *Queries) LastSetForExercise(ctx context.Context, arg LastSetForExerciseParams) (LastSetForExerciseRow, error) {
+	row := q.db.QueryRow(ctx, lastSetForExercise, arg.WorkoutExerciseID, arg.UserID)
+	var i LastSetForExerciseRow
 	err := row.Scan(
 		&i.ID,
 		&i.WorkoutExerciseID,
 		&i.SetNumber,
+		&i.Kind,
 		&i.WeightKg,
 		&i.Repetitions,
+		&i.DurationSeconds,
+		&i.DistanceMeters,
 		&i.IsWarmup,
 		&i.IsCompleted,
 	)
@@ -336,26 +519,32 @@ SELECT
     se.notes             AS exercise_notes,
     e.name               AS exercise_name,
     e.equipment,
+    COALESCE(e.kind::text, 'weighted') AS exercise_kind,
     e.is_archived        AS exercise_archived,
     st.id                AS set_id,
     st.set_number,
+    COALESCE(st.kind::text, 'weighted') AS kind,
     st.weight_kg,
     st.repetitions,
-    st.is_warmup,
-    st.is_completed
+    st.duration_seconds,
+    st.distance_meters,
+    COALESCE(st.is_warmup, false) AS is_warmup,
+    COALESCE(st.is_completed, false) AS is_completed
 FROM workout_sessions s
 LEFT JOIN workout_session_exercises se ON se.workout_session_id = s.id
 LEFT JOIN exercises e ON e.id = se.exercise_id
 LEFT JOIN workout_sets st ON st.workout_exercise_id = se.id
 WHERE
-    ($1::text IS NULL OR s.status = $1::text)
-    AND ($2::timestamptz IS NULL OR s.started_at >= $2::timestamptz)
-    AND ($3::timestamptz IS NULL OR s.started_at < $3::timestamptz)
-    AND ($4::bigint IS NULL OR s.id = $4::bigint)
+    s.user_id = $1::bigint
+    AND ($2::text IS NULL OR s.status = $2::text)
+    AND ($3::timestamptz IS NULL OR s.started_at >= $3::timestamptz)
+    AND ($4::timestamptz IS NULL OR s.started_at < $4::timestamptz)
+    AND ($5::bigint IS NULL OR s.id = $5::bigint)
 ORDER BY s.started_at DESC, s.id DESC, se.sort_order, st.set_number
 `
 
 type ListSessionDetailsParams struct {
+	UserID      int64
 	Status      *string
 	StartedFrom pgtype.Timestamptz
 	StartedTo   pgtype.Timestamptz
@@ -378,13 +567,17 @@ type ListSessionDetailsRow struct {
 	ExerciseNotes     *string
 	ExerciseName      *string
 	Equipment         *string
+	ExerciseKind      interface{}
 	ExerciseArchived  *bool
 	SetID             *int64
 	SetNumber         *int32
+	Kind              interface{}
 	WeightKg          pgtype.Numeric
 	Repetitions       *int16
-	IsWarmup          *bool
-	IsCompleted       *bool
+	DurationSeconds   *int32
+	DistanceMeters    pgtype.Numeric
+	IsWarmup          bool
+	IsCompleted       bool
 }
 
 // One row per (session, exercise, set). The service groups these into sessions.
@@ -396,6 +589,7 @@ type ListSessionDetailsRow struct {
 // queries that drift apart.
 func (q *Queries) ListSessionDetails(ctx context.Context, arg ListSessionDetailsParams) ([]ListSessionDetailsRow, error) {
 	rows, err := q.db.Query(ctx, listSessionDetails,
+		arg.UserID,
 		arg.Status,
 		arg.StartedFrom,
 		arg.StartedTo,
@@ -424,11 +618,15 @@ func (q *Queries) ListSessionDetails(ctx context.Context, arg ListSessionDetails
 			&i.ExerciseNotes,
 			&i.ExerciseName,
 			&i.Equipment,
+			&i.ExerciseKind,
 			&i.ExerciseArchived,
 			&i.SetID,
 			&i.SetNumber,
+			&i.Kind,
 			&i.WeightKg,
 			&i.Repetitions,
+			&i.DurationSeconds,
+			&i.DistanceMeters,
 			&i.IsWarmup,
 			&i.IsCompleted,
 		); err != nil {
@@ -451,12 +649,19 @@ SELECT
     se.notes,
     e.name AS exercise_name,
     e.equipment,
+    e.kind::text AS exercise_kind,
     e.is_archived
 FROM workout_session_exercises se
 JOIN exercises e ON e.id = se.exercise_id
-WHERE se.workout_session_id = $1
+JOIN workout_sessions s ON s.id = se.workout_session_id
+WHERE se.workout_session_id = $1 AND s.user_id = $2
 ORDER BY se.sort_order
 `
+
+type ListSessionExercisesParams struct {
+	WorkoutSessionID int64
+	UserID           int64
+}
 
 type ListSessionExercisesRow struct {
 	ID               int64
@@ -466,11 +671,12 @@ type ListSessionExercisesRow struct {
 	Notes            string
 	ExerciseName     string
 	Equipment        *string
+	ExerciseKind     string
 	IsArchived       bool
 }
 
-func (q *Queries) ListSessionExercises(ctx context.Context, workoutSessionID int64) ([]ListSessionExercisesRow, error) {
-	rows, err := q.db.Query(ctx, listSessionExercises, workoutSessionID)
+func (q *Queries) ListSessionExercises(ctx context.Context, arg ListSessionExercisesParams) ([]ListSessionExercisesRow, error) {
+	rows, err := q.db.Query(ctx, listSessionExercises, arg.WorkoutSessionID, arg.UserID)
 	if err != nil {
 		return nil, err
 	}
@@ -486,6 +692,7 @@ func (q *Queries) ListSessionExercises(ctx context.Context, workoutSessionID int
 			&i.Notes,
 			&i.ExerciseName,
 			&i.Equipment,
+			&i.ExerciseKind,
 			&i.IsArchived,
 		); err != nil {
 			return nil, err
@@ -499,27 +706,52 @@ func (q *Queries) ListSessionExercises(ctx context.Context, workoutSessionID int
 }
 
 const listSessionSets = `-- name: ListSessionSets :many
-SELECT id, workout_exercise_id, set_number, weight_kg, repetitions, is_warmup, is_completed
-FROM workout_sets
-WHERE workout_exercise_id = $1
-ORDER BY set_number
+SELECT st.id, st.workout_exercise_id, st.set_number, st.kind::text AS kind, st.weight_kg, st.repetitions,
+       st.duration_seconds, st.distance_meters,
+       st.is_warmup, st.is_completed
+FROM workout_sets st
+JOIN workout_session_exercises se ON se.id = st.workout_exercise_id
+JOIN workout_sessions s ON s.id = se.workout_session_id
+WHERE st.workout_exercise_id = $1 AND s.user_id = $2
+ORDER BY st.set_number
 `
 
-func (q *Queries) ListSessionSets(ctx context.Context, workoutExerciseID int64) ([]WorkoutSet, error) {
-	rows, err := q.db.Query(ctx, listSessionSets, workoutExerciseID)
+type ListSessionSetsParams struct {
+	WorkoutExerciseID int64
+	UserID            int64
+}
+
+type ListSessionSetsRow struct {
+	ID                int64
+	WorkoutExerciseID int64
+	SetNumber         int32
+	Kind              string
+	WeightKg          pgtype.Numeric
+	Repetitions       *int16
+	DurationSeconds   *int32
+	DistanceMeters    pgtype.Numeric
+	IsWarmup          bool
+	IsCompleted       bool
+}
+
+func (q *Queries) ListSessionSets(ctx context.Context, arg ListSessionSetsParams) ([]ListSessionSetsRow, error) {
+	rows, err := q.db.Query(ctx, listSessionSets, arg.WorkoutExerciseID, arg.UserID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []WorkoutSet
+	var items []ListSessionSetsRow
 	for rows.Next() {
-		var i WorkoutSet
+		var i ListSessionSetsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.WorkoutExerciseID,
 			&i.SetNumber,
+			&i.Kind,
 			&i.WeightKg,
 			&i.Repetitions,
+			&i.DurationSeconds,
+			&i.DistanceMeters,
 			&i.IsWarmup,
 			&i.IsCompleted,
 		); err != nil {
@@ -534,28 +766,51 @@ func (q *Queries) ListSessionSets(ctx context.Context, workoutExerciseID int64) 
 }
 
 const listSetsForSession = `-- name: ListSetsForSession :many
-SELECT st.id, st.workout_exercise_id, st.set_number, st.weight_kg, st.repetitions, st.is_warmup, st.is_completed
+SELECT st.id, st.workout_exercise_id, st.set_number, st.kind::text AS kind, st.weight_kg, st.repetitions,
+       st.duration_seconds, st.distance_meters, st.is_warmup, st.is_completed
 FROM workout_sets st
 JOIN workout_session_exercises se ON se.id = st.workout_exercise_id
-WHERE se.workout_session_id = $1
+JOIN workout_sessions s ON s.id = se.workout_session_id
+WHERE se.workout_session_id = $1 AND s.user_id = $2
 ORDER BY se.sort_order, st.set_number
 `
 
-func (q *Queries) ListSetsForSession(ctx context.Context, workoutSessionID int64) ([]WorkoutSet, error) {
-	rows, err := q.db.Query(ctx, listSetsForSession, workoutSessionID)
+type ListSetsForSessionParams struct {
+	WorkoutSessionID int64
+	UserID           int64
+}
+
+type ListSetsForSessionRow struct {
+	ID                int64
+	WorkoutExerciseID int64
+	SetNumber         int32
+	Kind              string
+	WeightKg          pgtype.Numeric
+	Repetitions       *int16
+	DurationSeconds   *int32
+	DistanceMeters    pgtype.Numeric
+	IsWarmup          bool
+	IsCompleted       bool
+}
+
+func (q *Queries) ListSetsForSession(ctx context.Context, arg ListSetsForSessionParams) ([]ListSetsForSessionRow, error) {
+	rows, err := q.db.Query(ctx, listSetsForSession, arg.WorkoutSessionID, arg.UserID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []WorkoutSet
+	var items []ListSetsForSessionRow
 	for rows.Next() {
-		var i WorkoutSet
+		var i ListSetsForSessionRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.WorkoutExerciseID,
 			&i.SetNumber,
+			&i.Kind,
 			&i.WeightKg,
 			&i.Repetitions,
+			&i.DurationSeconds,
+			&i.DistanceMeters,
 			&i.IsWarmup,
 			&i.IsCompleted,
 		); err != nil {
@@ -570,26 +825,39 @@ func (q *Queries) ListSetsForSession(ctx context.Context, workoutSessionID int64
 }
 
 const nextSessionExerciseSortOrder = `-- name: NextSessionExerciseSortOrder :one
-SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_order
-FROM workout_session_exercises
-WHERE workout_session_id = $1
+SELECT COALESCE(MAX(se.sort_order), 0) + 1 AS next_order
+FROM workout_session_exercises se
+JOIN workout_sessions s ON s.id = se.workout_session_id
+WHERE se.workout_session_id = $1 AND s.user_id = $2
 `
 
-func (q *Queries) NextSessionExerciseSortOrder(ctx context.Context, workoutSessionID int64) (int32, error) {
-	row := q.db.QueryRow(ctx, nextSessionExerciseSortOrder, workoutSessionID)
+type NextSessionExerciseSortOrderParams struct {
+	WorkoutSessionID int64
+	UserID           int64
+}
+
+func (q *Queries) NextSessionExerciseSortOrder(ctx context.Context, arg NextSessionExerciseSortOrderParams) (int32, error) {
+	row := q.db.QueryRow(ctx, nextSessionExerciseSortOrder, arg.WorkoutSessionID, arg.UserID)
 	var next_order int32
 	err := row.Scan(&next_order)
 	return next_order, err
 }
 
 const nextSetNumber = `-- name: NextSetNumber :one
-SELECT COALESCE(MAX(set_number), 0) + 1 AS next_number
-FROM workout_sets
-WHERE workout_exercise_id = $1
+SELECT COALESCE(MAX(st.set_number), 0) + 1 AS next_number
+FROM workout_sets st
+JOIN workout_session_exercises se ON se.id = st.workout_exercise_id
+JOIN workout_sessions s ON s.id = se.workout_session_id
+WHERE st.workout_exercise_id = $1 AND s.user_id = $2
 `
 
-func (q *Queries) NextSetNumber(ctx context.Context, workoutExerciseID int64) (int32, error) {
-	row := q.db.QueryRow(ctx, nextSetNumber, workoutExerciseID)
+type NextSetNumberParams struct {
+	WorkoutExerciseID int64
+	UserID            int64
+}
+
+func (q *Queries) NextSetNumber(ctx context.Context, arg NextSetNumberParams) (int32, error) {
+	row := q.db.QueryRow(ctx, nextSetNumber, arg.WorkoutExerciseID, arg.UserID)
 	var next_number int32
 	err := row.Scan(&next_number)
 	return next_number, err
@@ -598,43 +866,53 @@ func (q *Queries) NextSetNumber(ctx context.Context, workoutExerciseID int64) (i
 const previousExerciseSets = `-- name: PreviousExerciseSets :many
 SELECT
     st.set_number,
+    COALESCE(st.kind::text, 'weighted') AS kind,
     st.weight_kg,
     st.repetitions,
-    st.is_warmup,
+    st.duration_seconds,
+    st.distance_meters,
+    COALESCE(st.is_warmup, false) AS is_warmup,
     s.started_at
 FROM workout_sets st
 JOIN workout_session_exercises se ON se.id = st.workout_exercise_id
 JOIN workout_sessions s ON s.id = se.workout_session_id
-WHERE se.exercise_id = $1
+WHERE se.exercise_id = $1::bigint
+  AND s.user_id = $2::bigint
   AND s.status = 'completed'
   AND s.id <> $3::bigint
   AND s.started_at = (
       SELECT MAX(s2.started_at)
       FROM workout_sessions s2
       JOIN workout_session_exercises se2 ON se2.workout_session_id = s2.id
-      WHERE se2.exercise_id = $1 AND s2.status = 'completed' AND s2.id <> $2
+      WHERE se2.exercise_id = $1::bigint
+        AND s2.user_id = $2::bigint
+        AND s2.status = 'completed'
+        AND s2.id <> $3::bigint
   )
 ORDER BY st.set_number
 `
 
 type PreviousExerciseSetsParams struct {
 	ExerciseID       int64
-	ID               int64
+	UserID           int64
 	ExcludeSessionID int64
 }
 
 type PreviousExerciseSetsRow struct {
-	SetNumber   int32
-	WeightKg    pgtype.Numeric
-	Repetitions int16
-	IsWarmup    bool
-	StartedAt   pgtype.Timestamptz
+	SetNumber       int32
+	Kind            interface{}
+	WeightKg        pgtype.Numeric
+	Repetitions     *int16
+	DurationSeconds *int32
+	DistanceMeters  pgtype.Numeric
+	IsWarmup        bool
+	StartedAt       pgtype.Timestamptz
 }
 
 // "Last time" for one exercise: the most recent *other* completed session that
 // contains it, so an in-progress workout can prefill the next attempt.
 func (q *Queries) PreviousExerciseSets(ctx context.Context, arg PreviousExerciseSetsParams) ([]PreviousExerciseSetsRow, error) {
-	rows, err := q.db.Query(ctx, previousExerciseSets, arg.ExerciseID, arg.ID, arg.ExcludeSessionID)
+	rows, err := q.db.Query(ctx, previousExerciseSets, arg.ExerciseID, arg.UserID, arg.ExcludeSessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -644,8 +922,11 @@ func (q *Queries) PreviousExerciseSets(ctx context.Context, arg PreviousExercise
 		var i PreviousExerciseSetsRow
 		if err := rows.Scan(
 			&i.SetNumber,
+			&i.Kind,
 			&i.WeightKg,
 			&i.Repetitions,
+			&i.DurationSeconds,
+			&i.DistanceMeters,
 			&i.IsWarmup,
 			&i.StartedAt,
 		); err != nil {
@@ -662,13 +943,30 @@ func (q *Queries) PreviousExerciseSets(ctx context.Context, arg PreviousExercise
 const reopenSession = `-- name: ReopenSession :one
 UPDATE workout_sessions
 SET status = 'in_progress', finished_at = NULL
-WHERE id = $1
+WHERE id = $1 AND user_id = $2
 RETURNING id, template_id, name, started_at, finished_at, status, notes, created_at, updated_at
 `
 
-func (q *Queries) ReopenSession(ctx context.Context, id int64) (WorkoutSession, error) {
-	row := q.db.QueryRow(ctx, reopenSession, id)
-	var i WorkoutSession
+type ReopenSessionParams struct {
+	ID     int64
+	UserID int64
+}
+
+type ReopenSessionRow struct {
+	ID         int64
+	TemplateID *int64
+	Name       string
+	StartedAt  pgtype.Timestamptz
+	FinishedAt pgtype.Timestamptz
+	Status     string
+	Notes      string
+	CreatedAt  pgtype.Timestamptz
+	UpdatedAt  pgtype.Timestamptz
+}
+
+func (q *Queries) ReopenSession(ctx context.Context, arg ReopenSessionParams) (ReopenSessionRow, error) {
+	row := q.db.QueryRow(ctx, reopenSession, arg.ID, arg.UserID)
+	var i ReopenSessionRow
 	err := row.Scan(
 		&i.ID,
 		&i.TemplateID,
@@ -684,42 +982,49 @@ func (q *Queries) ReopenSession(ctx context.Context, id int64) (WorkoutSession, 
 }
 
 const setSessionExerciseSortOrder = `-- name: SetSessionExerciseSortOrder :exec
-UPDATE workout_session_exercises
+UPDATE workout_session_exercises se
 SET sort_order = $2
-WHERE id = $1
+FROM workout_sessions s
+WHERE se.id = $1 AND s.id = se.workout_session_id AND s.user_id = $3
 `
 
 type SetSessionExerciseSortOrderParams struct {
 	ID        int64
 	SortOrder int32
+	UserID    int64
 }
 
 func (q *Queries) SetSessionExerciseSortOrder(ctx context.Context, arg SetSessionExerciseSortOrderParams) error {
-	_, err := q.db.Exec(ctx, setSessionExerciseSortOrder, arg.ID, arg.SortOrder)
+	_, err := q.db.Exec(ctx, setSessionExerciseSortOrder, arg.ID, arg.SortOrder, arg.UserID)
 	return err
 }
 
 const setSetNumber = `-- name: SetSetNumber :exec
-UPDATE workout_sets
+UPDATE workout_sets st
 SET set_number = $2
-WHERE id = $1
+FROM workout_session_exercises se, workout_sessions s
+WHERE st.id = $1
+  AND se.id = st.workout_exercise_id
+  AND s.id = se.workout_session_id
+  AND s.user_id = $3
 `
 
 type SetSetNumberParams struct {
 	ID        int64
 	SetNumber int32
+	UserID    int64
 }
 
 // Keeps numbering contiguous after a deletion.
 func (q *Queries) SetSetNumber(ctx context.Context, arg SetSetNumberParams) error {
-	_, err := q.db.Exec(ctx, setSetNumber, arg.ID, arg.SetNumber)
+	_, err := q.db.Exec(ctx, setSetNumber, arg.ID, arg.SetNumber, arg.UserID)
 	return err
 }
 
 const updateSession = `-- name: UpdateSession :one
 UPDATE workout_sessions
 SET name = $2, notes = $3, started_at = $4
-WHERE id = $1
+WHERE id = $1 AND user_id = $5
 RETURNING id, template_id, name, started_at, finished_at, status, notes, created_at, updated_at
 `
 
@@ -728,16 +1033,30 @@ type UpdateSessionParams struct {
 	Name      string
 	Notes     string
 	StartedAt pgtype.Timestamptz
+	UserID    int64
 }
 
-func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (WorkoutSession, error) {
+type UpdateSessionRow struct {
+	ID         int64
+	TemplateID *int64
+	Name       string
+	StartedAt  pgtype.Timestamptz
+	FinishedAt pgtype.Timestamptz
+	Status     string
+	Notes      string
+	CreatedAt  pgtype.Timestamptz
+	UpdatedAt  pgtype.Timestamptz
+}
+
+func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (UpdateSessionRow, error) {
 	row := q.db.QueryRow(ctx, updateSession,
 		arg.ID,
 		arg.Name,
 		arg.Notes,
 		arg.StartedAt,
+		arg.UserID,
 	)
-	var i WorkoutSession
+	var i UpdateSessionRow
 	err := row.Scan(
 		&i.ID,
 		&i.TemplateID,
@@ -753,10 +1072,12 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (W
 }
 
 const updateSessionExercise = `-- name: UpdateSessionExercise :one
-UPDATE workout_session_exercises
+UPDATE workout_session_exercises se
 SET notes = $3, sort_order = $4
-WHERE id = $1 AND workout_session_id = $2
-RETURNING id, workout_session_id, exercise_id, sort_order, notes
+FROM workout_sessions s
+WHERE se.id = $1 AND se.workout_session_id = $2 AND s.id = se.workout_session_id
+  AND s.user_id = $5
+RETURNING se.id, se.workout_session_id, se.exercise_id, se.sort_order, se.notes
 `
 
 type UpdateSessionExerciseParams struct {
@@ -764,6 +1085,7 @@ type UpdateSessionExerciseParams struct {
 	WorkoutSessionID int64
 	Notes            string
 	SortOrder        int32
+	UserID           int64
 }
 
 func (q *Queries) UpdateSessionExercise(ctx context.Context, arg UpdateSessionExerciseParams) (WorkoutSessionExercise, error) {
@@ -772,6 +1094,7 @@ func (q *Queries) UpdateSessionExercise(ctx context.Context, arg UpdateSessionEx
 		arg.WorkoutSessionID,
 		arg.Notes,
 		arg.SortOrder,
+		arg.UserID,
 	)
 	var i WorkoutSessionExercise
 	err := row.Scan(
@@ -785,35 +1108,67 @@ func (q *Queries) UpdateSessionExercise(ctx context.Context, arg UpdateSessionEx
 }
 
 const updateSet = `-- name: UpdateSet :one
-UPDATE workout_sets
-SET weight_kg = $2, repetitions = $3, is_warmup = $4, is_completed = $5
-WHERE id = $1
-RETURNING id, workout_exercise_id, set_number, weight_kg, repetitions, is_warmup, is_completed
+UPDATE workout_sets st
+SET weight_kg = $1,
+    repetitions = $2,
+    duration_seconds = $3,
+    distance_meters = $4,
+    is_warmup = $5,
+    is_completed = $6
+FROM workout_session_exercises se, workout_sessions s
+WHERE st.id = $7
+  AND se.id = st.workout_exercise_id
+  AND s.id = se.workout_session_id
+  AND s.user_id = $8
+RETURNING st.id, st.workout_exercise_id, st.set_number, st.kind::text AS kind, st.weight_kg,
+          st.repetitions, st.duration_seconds, st.distance_meters, st.is_warmup, st.is_completed
 `
 
 type UpdateSetParams struct {
-	ID          int64
-	WeightKg    pgtype.Numeric
-	Repetitions int16
-	IsWarmup    bool
-	IsCompleted bool
+	WeightKg        pgtype.Numeric
+	Repetitions     *int16
+	DurationSeconds *int32
+	DistanceMeters  pgtype.Numeric
+	IsWarmup        bool
+	IsCompleted     bool
+	ID              int64
+	UserID          int64
 }
 
-func (q *Queries) UpdateSet(ctx context.Context, arg UpdateSetParams) (WorkoutSet, error) {
+type UpdateSetRow struct {
+	ID                int64
+	WorkoutExerciseID int64
+	SetNumber         int32
+	Kind              string
+	WeightKg          pgtype.Numeric
+	Repetitions       *int16
+	DurationSeconds   *int32
+	DistanceMeters    pgtype.Numeric
+	IsWarmup          bool
+	IsCompleted       bool
+}
+
+func (q *Queries) UpdateSet(ctx context.Context, arg UpdateSetParams) (UpdateSetRow, error) {
 	row := q.db.QueryRow(ctx, updateSet,
-		arg.ID,
 		arg.WeightKg,
 		arg.Repetitions,
+		arg.DurationSeconds,
+		arg.DistanceMeters,
 		arg.IsWarmup,
 		arg.IsCompleted,
+		arg.ID,
+		arg.UserID,
 	)
-	var i WorkoutSet
+	var i UpdateSetRow
 	err := row.Scan(
 		&i.ID,
 		&i.WorkoutExerciseID,
 		&i.SetNumber,
+		&i.Kind,
 		&i.WeightKg,
 		&i.Repetitions,
+		&i.DurationSeconds,
+		&i.DistanceMeters,
 		&i.IsWarmup,
 		&i.IsCompleted,
 	)

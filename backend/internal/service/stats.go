@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ioganvaise83/ironnote/internal/apperror"
+	"github.com/ioganvaise83/ironnote/internal/auth"
 )
 
 // StatsPeriod is a half-open interval [From, To) in absolute time.
@@ -22,25 +23,34 @@ type MonthlyPoint struct {
 
 // StatsSummary is the headline block of the statistics screen.
 type StatsSummary struct {
-	SessionCount           int            `json:"sessionCount"`
-	CompletedSetCount      int            `json:"completedSetCount"`
-	VolumeKg               float64        `json:"volumeKg"`
-	ExerciseCount          int            `json:"exerciseCount"`
-	AverageDurationMinutes float64        `json:"averageDurationMinutes"`
-	Monthly                []MonthlyPoint `json:"monthly"`
+	SessionCount           int     `json:"sessionCount"`
+	CompletedSetCount      int     `json:"completedSetCount"`
+	VolumeKg               float64 `json:"volumeKg"`
+	ExerciseCount          int     `json:"exerciseCount"`
+	AverageDurationMinutes float64 `json:"averageDurationMinutes"`
+	// Cardio totals: time recorded by timed sets and distance covered. Kept apart
+	// from VolumeKg, which is strictly weight × reps.
+	TotalSeconds int32          `json:"totalSeconds"`
+	TotalMeters  float64        `json:"totalMeters"`
+	Monthly      []MonthlyPoint `json:"monthly"`
 }
 
 // ExerciseBest is one row of the per-exercise leaderboard.
 type ExerciseBest struct {
-	ExerciseID        int64      `json:"exerciseId"`
-	ExerciseName      string     `json:"exerciseName"`
-	CompletedSetCount int        `json:"completedSetCount"`
-	VolumeKg          float64    `json:"volumeKg"`
-	MaxWeightKg       *float64   `json:"maxWeightKg"`
-	MaxSingleKg       *float64   `json:"maxSingleKg"`
-	Estimated1RMKg    *float64   `json:"estimated1RMKg"`
-	BestSetVolumeKg   *float64   `json:"bestSetVolumeKg"`
-	LastPerformedAt   *time.Time `json:"lastPerformedAt"`
+	ExerciseID        int64    `json:"exerciseId"`
+	ExerciseName      string   `json:"exerciseName"`
+	CompletedSetCount int      `json:"completedSetCount"`
+	VolumeKg          float64  `json:"volumeKg"`
+	MaxWeightKg       *float64 `json:"maxWeightKg"`
+	MaxSingleKg       *float64 `json:"maxSingleKg"`
+	Estimated1RMKg    *float64 `json:"estimated1RMKg"`
+	BestSetVolumeKg   *float64 `json:"bestSetVolumeKg"`
+	// For timed exercises: total time and distance in the period, plus the
+	// longest single effort. Zero for strength movements.
+	TotalSeconds    int32      `json:"totalSeconds"`
+	TotalMeters     float64    `json:"totalMeters"`
+	LongestSeconds  *int32     `json:"longestSeconds"`
+	LastPerformedAt *time.Time `json:"lastPerformedAt"`
 }
 
 // ExerciseSeriesPoint is one dot on an exercise progress chart.
@@ -50,6 +60,8 @@ type ExerciseSeriesPoint struct {
 	VolumeKg       float64   `json:"volumeKg"`
 	MaxWeightKg    *float64  `json:"maxWeightKg"`
 	Estimated1RMKg *float64  `json:"estimated1RMKg"`
+	Seconds        int32     `json:"seconds"`
+	Meters         float64   `json:"meters"`
 }
 
 // ExerciseStats is the payload for the exercise statistics screen.
@@ -63,6 +75,9 @@ type ExerciseStats struct {
 	TotalVolumeKg  float64               `json:"totalVolumeKg"`
 	TotalSets      int                   `json:"totalSets"`
 	RecentSets     []SetHistoryEntry     `json:"recentSets"`
+	TotalSeconds   int32                 `json:"totalSeconds"`
+	TotalMeters    float64               `json:"totalMeters"`
+	LongestSeconds *int32                `json:"longestSeconds"`
 }
 
 // SetHistoryEntry is a performed set shown in the exercise detail list.
@@ -77,9 +92,9 @@ type SetHistoryEntry struct {
 }
 
 // ListSessionsForStats loads completed sessions in the period.
-func (s *Service) periodSessions(ctx context.Context, p StatsPeriod) ([]Session, error) {
+func (s *Service) periodSessions(ctx context.Context, actor auth.Actor, p StatsPeriod) ([]Session, error) {
 	status := StatusCompleted
-	rows, err := s.q.ListSessionDetails(ctx, listDetailsParamsForPeriod(status, p))
+	rows, err := s.q.ListSessionDetails(ctx, listDetailsParamsForPeriod(actor.UserID, status, p))
 	if err != nil {
 		return nil, apperror.Internal(err)
 	}
@@ -88,8 +103,8 @@ func (s *Service) periodSessions(ctx context.Context, p StatsPeriod) ([]Session,
 
 // SummaryStats aggregates the period. All maths comes from Summarize and Set,
 // the same functions the history screen uses.
-func (s *Service) SummaryStats(ctx context.Context, p StatsPeriod) (StatsSummary, error) {
-	sessions, err := s.periodSessions(ctx, p)
+func (s *Service) SummaryStats(ctx context.Context, actor auth.Actor, p StatsPeriod) (StatsSummary, error) {
+	sessions, err := s.periodSessions(ctx, actor, p)
 	if err != nil {
 		return StatsSummary{}, err
 	}
@@ -104,6 +119,8 @@ func (s *Service) SummaryStats(ctx context.Context, p StatsPeriod) (StatsSummary
 		out.SessionCount++
 		out.CompletedSetCount += summary.CompletedSetCount
 		out.VolumeKg += summary.VolumeKg
+		out.TotalSeconds += summary.DurationSeconds
+		out.TotalMeters += summary.DistanceMeters
 		for _, ex := range session.Exercises {
 			if len(ex.Sets) > 0 {
 				exercises[ex.ExerciseID] = true
@@ -116,6 +133,7 @@ func (s *Service) SummaryStats(ctx context.Context, p StatsPeriod) (StatsSummary
 		monthly[monthKey(session.StartedAt, s.loc)]++
 	}
 	out.ExerciseCount = len(exercises)
+	out.TotalMeters = roundTo(out.TotalMeters, 1)
 	if durationCount > 0 {
 		out.AverageDurationMinutes = roundTo(durationSum/float64(durationCount), 1)
 	}
@@ -132,8 +150,8 @@ func (s *Service) SummaryStats(ctx context.Context, p StatsPeriod) (StatsSummary
 }
 
 // ExerciseBests returns one row per exercise performed in the period.
-func (s *Service) ExerciseBests(ctx context.Context, p StatsPeriod) ([]ExerciseBest, error) {
-	sessions, err := s.periodSessions(ctx, p)
+func (s *Service) ExerciseBests(ctx context.Context, actor auth.Actor, p StatsPeriod) ([]ExerciseBest, error) {
+	sessions, err := s.periodSessions(ctx, actor, p)
 	if err != nil {
 		return nil, err
 	}
@@ -176,6 +194,16 @@ func (s *Service) ExerciseBests(ctx context.Context, p StatsPeriod) ([]ExerciseB
 				if set.IsActualSingle() {
 					a.best.MaxSingleKg = maxPtr(a.best.MaxSingleKg, set.WeightKg.Float())
 				}
+				if seconds, ok := set.WorkSeconds(); ok {
+					a.best.TotalSeconds += seconds
+					if a.best.LongestSeconds == nil || seconds > *a.best.LongestSeconds {
+						v := seconds
+						a.best.LongestSeconds = &v
+					}
+				}
+				if meters, ok := set.WorkDistance(); ok {
+					a.best.TotalMeters += meters
+				}
 			}
 		}
 	}
@@ -188,6 +216,7 @@ func (s *Service) ExerciseBests(ctx context.Context, p StatsPeriod) ([]ExerciseB
 		b.MaxSingleKg = roundPtr(b.MaxSingleKg)
 		b.Estimated1RMKg = roundPtr(b.Estimated1RMKg)
 		b.BestSetVolumeKg = roundPtr(b.BestSetVolumeKg)
+		b.TotalMeters = roundTo(b.TotalMeters, 1)
 		out = append(out, b)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ExerciseName < out[j].ExerciseName })
@@ -196,12 +225,12 @@ func (s *Service) ExerciseBests(ctx context.Context, p StatsPeriod) ([]ExerciseB
 
 // ExerciseStatsFor returns the series and records for one exercise. The series
 // is chronological, so the chart can plot it directly.
-func (s *Service) ExerciseStatsFor(ctx context.Context, exerciseID int64, p StatsPeriod, historyLimit int32) (ExerciseStats, error) {
+func (s *Service) ExerciseStatsFor(ctx context.Context, actor auth.Actor, exerciseID int64, p StatsPeriod, historyLimit int32) (ExerciseStats, error) {
 	ex, err := s.GetExercise(ctx, exerciseID)
 	if err != nil {
 		return ExerciseStats{}, err
 	}
-	sessions, err := s.periodSessions(ctx, p)
+	sessions, err := s.periodSessions(ctx, actor, p)
 	if err != nil {
 		return ExerciseStats{}, err
 	}
@@ -228,7 +257,7 @@ func (s *Service) ExerciseStatsFor(ctx context.Context, exerciseID int64, p Stat
 				out.RecentSets = append(out.RecentSets, SetHistoryEntry{
 					SessionID: session.ID, Date: session.StartedAt, SetNumber: set.SetNumber,
 					WeightKg: set.WeightKg, WeightValue: set.WeightKg.Ptr(),
-					Repetitions: set.Repetitions, IsWarmup: set.IsWarmup,
+					Repetitions: set.Reps(), IsWarmup: set.IsWarmup,
 				})
 				if volume, counted := set.Volume(); counted {
 					point.VolumeKg += volume
@@ -242,6 +271,18 @@ func (s *Service) ExerciseStatsFor(ctx context.Context, exerciseID int64, p Stat
 				}
 				if set.IsActualSingle() {
 					out.MaxSingleKg = maxPtr(out.MaxSingleKg, set.WeightKg.Float())
+				}
+				if seconds, ok := set.WorkSeconds(); ok {
+					point.Seconds += seconds
+					out.TotalSeconds += seconds
+					if out.LongestSeconds == nil || seconds > *out.LongestSeconds {
+						v := seconds
+						out.LongestSeconds = &v
+					}
+				}
+				if meters, ok := set.WorkDistance(); ok {
+					point.Meters += meters
+					out.TotalMeters += meters
 				}
 			}
 			out.Series = append(out.Series, point)
@@ -260,6 +301,7 @@ func (s *Service) ExerciseStatsFor(ctx context.Context, exerciseID int64, p Stat
 	}
 
 	out.TotalVolumeKg = roundKg(out.TotalVolumeKg)
+	out.TotalMeters = roundTo(out.TotalMeters, 1)
 	out.MaxWeightKg = roundPtr(out.MaxWeightKg)
 	out.MaxSingleKg = roundPtr(out.MaxSingleKg)
 	out.Estimated1RMKg = roundPtr(out.Estimated1RMKg)

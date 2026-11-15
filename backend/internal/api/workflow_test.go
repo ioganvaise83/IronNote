@@ -144,13 +144,24 @@ func TestFullWorkoutJourney(t *testing.T) {
 		t.Fatalf("partial patch broke other fields: %+v", patched)
 	}
 
-	// 8. Copy the previous set's values in one tap.
+	// 8. Copy the previous set's values in one tap. Only copyPrevious is sent, which
+	// is what the UI does: copied values are defaults.
 	var copied setPayload
-	resp, raw = env.do(http.MethodPost, base, map[string]any{"repetitions": 1, "copyPrevious": true}, &copied)
+	resp, raw = env.do(http.MethodPost, base, map[string]any{"copyPrevious": true}, &copied)
 	env.expect(resp, http.StatusCreated, raw)
 	if copied.WeightKg == nil || *copied.WeightKg != 40 || copied.Repetitions != 15 {
 		t.Fatalf("copyPrevious did not copy the last set: %+v", copied)
 	}
+
+	// 8b. An explicit value overrides the copied one (single-field correction).
+	var corrected setPayload
+	resp, raw = env.do(http.MethodPost, base, map[string]any{"copyPrevious": true, "repetitions": 6}, &corrected)
+	env.expect(resp, http.StatusCreated, raw)
+	if corrected.WeightKg == nil || *corrected.WeightKg != 40 || corrected.Repetitions != 6 {
+		t.Fatalf("explicit repetitions did not win over the copied value: %+v", corrected)
+	}
+	resp, raw = env.do(http.MethodDelete, base+"/"+itoa(corrected.ID), nil, nil)
+	env.expect(resp, http.StatusNoContent, raw)
 
 	// 9. Delete that copied set; numbering must stay contiguous.
 	resp, raw = env.do(http.MethodDelete, base+"/"+itoa(copied.ID), nil, nil)
@@ -436,10 +447,15 @@ func TestValidationAndErrorEnvelope(t *testing.T) {
 	}, &errBody)
 	env.expect(resp, http.StatusBadRequest, raw)
 
-	// An unknown JSON field is rejected instead of silently ignored.
+	// An unknown JSON field is rejected instead of silently ignored. The request
+	// must be authenticated, otherwise 401 would mask the 400 under test.
 	req, _ := http.NewRequest(http.MethodPost, env.server.URL+"/api/muscle-groups",
 		bytesReader(`{"name":"x","typo":1}`))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", env.admin.csrf)
+	for _, cookie := range env.admin.http.Jar.Cookies(mustParseURL(t, env.server.URL)) {
+		req.AddCookie(cookie)
+	}
 	rawResp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -454,7 +470,7 @@ func TestMuscleGroupInUseCannotBeDeleted(t *testing.T) {
 	var groups struct {
 		Items []muscleGroup `json:"items"`
 	}
-	_, _ = env.do(http.MethodGet, "/api/muscle-groups", nil, &groups)
+	env.do(http.MethodGet, "/api/muscle-groups", nil, &groups)
 	chestID := findGroup(t, groups.Items, "Грудь")
 
 	var ex exercise
