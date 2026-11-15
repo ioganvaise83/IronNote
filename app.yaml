@@ -1,0 +1,76 @@
+# Manifest of the IronNote application.
+id: ironnote
+name: IronNote
+purpose: >
+  Личный дневник силовых тренировок: справочники групп мышц и упражнений,
+  шаблоны, запись подходов, история и базовая статистика прогресса. Без
+  авторизации, без рекомендаций и без AI — только фактические данные.
+
+status: active
+type: fullstack
+
+stack:
+  languages:
+    - typescript
+    - go
+    - sql
+  frameworks:
+    - react
+    - vite
+    - tailwindcss
+    - chi
+  runtime: docker-compose
+  database: postgresql
+  notes: >
+    React 18 + TypeScript + Vite + Tailwind + React Router + TanStack Query on the
+    front, Go + chi + pgx/v5 + sqlc on the back, PostgreSQL 16 with SQL migrations
+    embedded in the binary and applied on boot.
+
+components:
+  frontend:
+    path: frontend
+    description: React SPA, served by nginx which also proxies /api
+  backend:
+    path: backend
+    description: Go REST API (chi), pgx store, business rules in internal/service
+  database:
+    path: backend/migrations
+    description: PostgreSQL schema, seed data, embedded migration runner
+
+commands:
+  install: make install
+  run: docker compose up --build
+  test: make test
+  lint: make lint
+  build: make rebuild
+
+env:
+  required:
+    - POSTGRES_PASSWORD
+    - DATABASE_URL
+  optional:
+    - POSTGRES_USER
+    - POSTGRES_DB
+    - APP_PORT
+    - APP_TIMEZONE
+    - LOG_LEVEL
+    - LOG_FORMAT
+    - HTTP_ADDR
+    - CORS_ALLOWED_ORIGINS
+    - TEST_DATABASE_URL
+
+docs:
+  readme: README.md
+  architecture: docs/architecture.md
+  api: docs/api.md
+
+knowledge:
+  path: /workspace/knowledge/knowledge/projects/ironnote
+  exists: false
+
+repository:
+  git: true
+  remote: https://github.com/ioganvaise83/IronNote.git
+
+created: 2026-11-15
+updated: 2026-11-15

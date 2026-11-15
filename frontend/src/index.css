@@ -1,0 +1,138 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    /* Safe-area insets for notched phones; used by the bottom nav and sheets. */
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --nav-height: 4.25rem;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-canvas text-ink font-sans antialiased;
+    /* Fill the visible viewport on mobile browsers with collapsing toolbars. */
+    min-height: 100dvh;
+    overscroll-behavior-y: none;
+  }
+
+  /* iOS zooms any input below 16px, which breaks a one-handed session. */
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-canvas;
+  }
+
+  /* Native number spinners steal width from the weight field. */
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-card border border-line bg-surface;
+  }
+
+  .tap-target {
+    @apply min-h-tap min-w-tap;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 font-medium transition
+      active:scale-[0.985] disabled:pointer-events-none disabled:opacity-45;
+    min-height: 2.75rem;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent text-white hover:bg-accent-strong;
+  }
+
+  .btn-secondary {
+    @apply btn border border-line bg-surface-raised text-ink hover:bg-surface-hover;
+  }
+
+  .btn-ghost {
+    @apply btn text-ink-muted hover:bg-surface-hover hover:text-ink;
+  }
+
+  .btn-danger {
+    @apply btn bg-danger/15 text-danger hover:bg-danger/25;
+  }
+
+  .field {
+    @apply w-full rounded-xl border border-line bg-canvas px-3 text-ink placeholder:text-ink-faint;
+    min-height: 2.75rem;
+  }
+
+  .field-label {
+    @apply mb-1.5 block text-sm font-medium text-ink-muted;
+  }
+
+  .chip {
+    @apply inline-flex shrink-0 items-center gap-1.5 rounded-full border border-line bg-surface-raised
+      px-3.5 py-2 text-sm text-ink-muted transition;
+    min-height: 2.75rem;
+  }
+
+  .chip-active {
+    @apply border-accent/60 bg-accent-soft text-ink;
+  }
+
+  .section-title {
+    @apply text-xs font-semibold uppercase tracking-[0.14em] text-ink-faint;
+  }
+
+  /* Bottom navigation must sit above the iPhone home indicator. */
+  .safe-bottom {
+    padding-bottom: calc(var(--safe-bottom) + 0.5rem);
+  }
+
+  .safe-top {
+    padding-top: calc(var(--safe-top) + 0.5rem);
+  }
+
+  /* Space for the fixed bottom navigation, so the last row is never hidden. */
+  .page-with-nav {
+    padding-bottom: calc(var(--nav-height) + var(--safe-bottom) + 1.5rem);
+  }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,45 @@
+# Secrets and local configuration — never commit.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*.json
+*oauth*.json
+*.token
+
+# Runtime data, databases, logs
+runtime/
+data/
+*.sqlite
+*.sqlite3
+*.db
+logs/
+*.log
+
+# Node
+node_modules/
+dist/
+.vite/
+coverage/
+
+# Go
+/backend/bin/
+/backend/api
+*.test
+*.out
+
+# Temporary and local artefacts
+*.tmp
+*.temp
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Editor / OS
+.idea/
+.vscode/
+!.vscode/extensions.json
